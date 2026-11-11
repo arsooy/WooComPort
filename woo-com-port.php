@@ -171,7 +171,22 @@ function woocomport_find_product_links( $html, $base_url ) {
 		if ( ! $href || strpos( $href, '#' ) === 0 || stripos( $href, 'javascript:' ) === 0 ) {
 			continue;
 		}
-		$url = esc_url_raw( (string) ( wp_parse_url( $href, PHP_URL_SCHEME ) ? $href : trailingslashit( $base_url ) . ltrim( $href, '/' ) ) );
+		if ( wp_parse_url( $href, PHP_URL_SCHEME ) ) {
+			$resolved = $href;
+		} else {
+			$base_parts = wp_parse_url( $base_url );
+			$origin     = ( $base_parts['scheme'] ?? 'https' ) . '://' . ( $base_parts['host'] ?? '' );
+			if ( 0 === strpos( $href, '//' ) ) {
+				$resolved = ( $base_parts['scheme'] ?? 'https' ) . ':' . $href;
+			} elseif ( 0 === strpos( $href, '/' ) ) {
+				$resolved = $origin . $href;
+			} else {
+				$base_path = $base_parts['path'] ?? '/';
+				$directory = trailingslashit( dirname( $base_path ) );
+				$resolved  = $origin . $directory . $href;
+			}
+		}
+		$url = esc_url_raw( (string) $resolved );
 		if ( ! wp_http_validate_url( $url ) || strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) ) !== strtolower( (string) $host ) ) {
 			continue;
 		}
