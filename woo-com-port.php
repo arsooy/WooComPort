@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.6.3
+ * Version: 1.6.4
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.6.3' );
+define( 'WOOCOMPORT_VERSION', '1.6.4' );
 
 add_action( 'admin_menu', function () {
     add_menu_page( 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page', 'dashicons-products', 56 );
@@ -91,51 +91,78 @@ function woocomport_extract_product( $html, $url ) {
             if ( $heading_text !== '' ) { $out['name'] = $heading_text; break; }
         }
     }
-    // Extract image URLs from metadata, structured data, lazy-load attributes, srcsets and linked image files.
-    foreach ( array( 'og:image', 'twitter:image', 'twitter:image:src' ) as $image_key ) {
-        if ( ! empty( $meta[$image_key] ) ) {
-            $src = esc_url_raw( WP_Http::make_absolute_url( $meta[$image_key], $url ) );
-            if ( $src && wp_http_validate_url( $src ) ) $out['gallery'][$src] = $src;
+    // Keep only the product's own image and images inside an explicitly identified product gallery.
+    // Page-wide image scraping is intentionally disabled: it captures logos, trust badges, banners and category artwork.
+    $gallery_candidates = array();
+
+    // Open Graph / Twitter image is used only as the product's featured image, never as a source for unrelated gallery items.
+    if ( ! empty( $out['image'] ) ) {
+        $featured = esc_url_raw( WP_Http::make_absolute_url( $out['image'], $url ) );
+        if ( $featured && wp_http_validate_url( $featured ) ) {
+            $out['image'] = $featured;
+            $gallery_candidates[$featured] = $featured;
         }
     }
+
+    // Read image values only from Schema.org Product objects (not recursively from the whole page JSON).
     foreach ( $xp->query('//script[@type="application/ld+json"]') as $script ) {
         $json = json_decode( $script->textContent, true );
-        $walk_images = function( $node ) use ( &$walk_images, &$out, $url ) {
-            if ( is_string( $node ) && preg_match('~\\.(jpg|jpeg|png|webp|gif)(?:[?#]|$)~i', $node) ) {
-                $src = esc_url_raw( WP_Http::make_absolute_url( $node, $url ) );
-                if ( $src && wp_http_validate_url( $src ) ) $out['gallery'][$src] = $src;
-            } elseif ( is_array( $node ) ) {
-                foreach ( $node as $value ) $walk_images( $value );
-            }
-        };
-        if ( is_array( $json ) ) $walk_images( $json );
-    }
-    $gallery_nodes = $xp->query('//img | //source[@srcset] | //a[@href]');
-    foreach ( $gallery_nodes as $node ) {
-        $tag = strtolower( $node->nodeName );
-        $candidates = array();
-        foreach ( array( 'data-large_image', 'data-large', 'data-original', 'data-zoom-image', 'data-full', 'data-src', 'data-lazy-src', 'data-original-src', 'src', 'href' ) as $attr ) {
-            $value = trim( $node->getAttribute( $attr ) );
-            if ( $value ) $candidates[] = $value;
-        }
-        foreach ( array( 'srcset', 'data-srcset' ) as $attr ) {
-            $srcset = trim( $node->getAttribute( $attr ) );
-            if ( $srcset ) foreach ( explode( ',', $srcset ) as $candidate ) {
-                $parts = preg_split('/\\s+/', trim($candidate));
-                if ( ! empty($parts[0]) ) $candidates[] = $parts[0];
+        if ( ! is_array( $json ) ) continue;
+        $nodes = isset($json['@graph']) && is_array($json['@graph']) ? $json['@graph'] : ( isset($json[0]) ? $json : array($json) );
+        foreach ( $nodes as $node ) {
+            if ( ! is_array($node) ) continue;
+            $type = $node['@type'] ?? '';
+            $types = is_array($type) ? $type : array($type);
+            if ( ! in_array('Product', $types, true) && ! in_array('https://schema.org/Product', $types, true) && ! in_array('http://schema.org/Product', $types, true) ) continue;
+            $images = $node['image'] ?? array();
+            foreach ( (array) $images as $image_value ) {
+                if ( is_array($image_value) ) $image_value = $image_value['url'] ?? ($image_value['contentUrl'] ?? '');
+                if ( ! is_string($image_value) || '' === trim($image_value) ) continue;
+                $src = esc_url_raw( WP_Http::make_absolute_url( trim($image_value), $url ) );
+                if ( $src && wp_http_validate_url($src) ) $gallery_candidates[$src] = $src;
             }
         }
-        foreach ( $candidates as $candidate ) {
-            if ( ! preg_match('~\\.(jpg|jpeg|png|webp|gif)(?:[?#]|$)~i', $candidate) && $tag !== 'img' && $tag !== 'source' ) continue;
-            $src = esc_url_raw( WP_Http::make_absolute_url( $candidate, $url ) );
-            if ( $src && wp_http_validate_url( $src ) ) $out['gallery'][$src] = $src;
+    }
+
+    // Accept DOM images only when they belong to a clearly named product-gallery container.
+    $gallery_xpath = '//*[contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," woocommerce-product-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-images ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-image-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," gallery-main ")]';
+    foreach ( $xp->query($gallery_xpath) as $gallery_container ) {
+        // Reject containers that are clearly listing cards, related products, category tiles or site chrome.
+        $container_context = strtolower($gallery_container->getAttribute('class') . ' ' . $gallery_container->getAttribute('id'));
+        if ( preg_match('/related|upsell|cross.?sell|product-category|category|logo|banner|header|footer|trust|badge/u', $container_context) ) continue;
+        foreach ( $xp->query('.//img | .//source[@srcset] | .//a[.//img]', $gallery_container) as $node ) {
+            $candidates = array();
+            foreach ( array('data-large_image','data-large','data-original','data-zoom-image','data-full','data-src','data-lazy-src','data-original-src','src') as $attr ) {
+                $value = trim($node->getAttribute($attr));
+                if ( $value ) $candidates[] = $value;
+            }
+            foreach ( array('srcset','data-srcset') as $attr ) {
+                $srcset = trim($node->getAttribute($attr));
+                if ( $srcset ) foreach ( explode(',', $srcset) as $candidate ) {
+                    $parts = preg_split('/\\s+/', trim($candidate));
+                    if ( ! empty($parts[0]) ) $candidates[] = $parts[0];
+                }
+            }
+            if ( strtolower($node->nodeName) === 'a' ) {
+                $href = trim($node->getAttribute('href'));
+                if ( $href ) $candidates[] = $href;
+            }
+            $alt = strtolower($node->getAttribute('alt') . ' ' . $node->getAttribute('title') . ' ' . $node->getAttribute('class'));
+            if ( preg_match('/logo|banner|trust|namad|etemad|badge|icon|category|power/u', $alt) ) continue;
+            foreach ( $candidates as $candidate ) {
+                if ( ! preg_match('~\\.(jpg|jpeg|png|webp|gif)(?:[?#]|$)~i', $candidate) ) continue;
+                $src = esc_url_raw( WP_Http::make_absolute_url($candidate, $url) );
+                if ( $src && wp_http_validate_url($src) ) $gallery_candidates[$src] = $src;
+            }
         }
     }
-    if ( $out['image'] ) {
-        $src = esc_url_raw( WP_Http::make_absolute_url( $out['image'], $url ) );
-        if ( $src && wp_http_validate_url( $src ) ) $out['gallery'][$src] = $src;
+
+    // The featured image is always first; deduplicate and cap gallery size.
+    if ( ! empty($out['image']) ) {
+        $gallery_candidates = array($out['image'] => $out['image']) + $gallery_candidates;
     }
-    $out['gallery'] = array_slice( $out['gallery'], 0, 30, true );
+    $out['gallery'] = array_slice($gallery_candidates, 0, 30, true);
+
     // Extract visible product attributes from WooCommerce tables and definition lists.
     foreach ( $xp->query('//table[contains(@class,"woocommerce-product-attributes")]//tr | //table[contains(@class,"product-attributes")]//tr | //dl[contains(@class,"product")]/dt') as $row ) {
         if ( strtolower($row->nodeName) === 'tr' ) {
