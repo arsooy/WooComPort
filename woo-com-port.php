@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.1.0' );
+define( 'WOOCOMPORT_VERSION', '1.2.0' );
 
 add_action( 'admin_menu', function () {
     add_submenu_page( 'woocommerce', 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port', 'woocomport_render_page' );
@@ -111,6 +111,97 @@ function woocomport_find_product_links( $html, $base_url ) {
     return array_slice( $found, 0, 20, true );
 }
 
+
+/**
+ * Identify listing-card product links and child category links only.
+ * Generic page links and pagination are deliberately ignored.
+ */
+function woocomport_parse_listing( $html, $base_url ) {
+    $result = array( 'products' => array(), 'categories' => array() );
+    if ( ! class_exists( 'DOMDocument' ) ) return $result;
+    $previous = libxml_use_internal_errors( true );
+    $dom = new DOMDocument();
+    $dom->loadHTML( '<?xml encoding="utf-8" ?>' . $html );
+    $xp = new DOMXPath( $dom );
+    $host = strtolower( (string) wp_parse_url( $base_url, PHP_URL_HOST ) );
+    $resolve = function( $href ) use ( $base_url, $host ) {
+        $url = esc_url_raw( WP_Http::make_absolute_url( trim( (string) $href ), $base_url ) );
+        if ( ! $url || ! wp_http_validate_url( $url ) || strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) ) !== $host ) return '';
+        $path = strtolower( (string) wp_parse_url( $url, PHP_URL_PATH ) );
+        if ( preg_match( '~\\.(jpg|jpeg|png|webp|gif|pdf|zip)$~i', $path ) ) return '';
+        return $url;
+    };
+    $product_nodes = $xp->query(
+        '//*[contains(concat(" ", normalize-space(@class), " "), " products ")]/*[contains(concat(" ", normalize-space(@class), " "), " product ")] |
+         //li[contains(concat(" ", normalize-space(@class), " "), " product ") and not(contains(concat(" ", normalize-space(@class), " "), " product-category "))]'
+    );
+    foreach ( $product_nodes as $node ) {
+        foreach ( $xp->query( './/a[@href]', $node ) as $a ) {
+            $url = $resolve( $a->getAttribute( 'href' ) );
+            if ( $url ) { $result['products'][$url] = trim( sanitize_text_field( $a->textContent ) ); break; }
+        }
+    }
+    $category_nodes = $xp->query(
+        '//*[contains(concat(" ", normalize-space(@class), " "), " product-category ")]//a[@href] |
+         //a[contains(concat(" ", normalize-space(@class), " "), " product-category ")][@href]'
+    );
+    foreach ( $category_nodes as $a ) {
+        $url = $resolve( $a->getAttribute( 'href' ) );
+        if ( $url && $url !== $base_url ) $result['categories'][$url] = trim( sanitize_text_field( $a->textContent ) );
+    }
+    // Some WooCommerce themes put the category class on the card, not its anchor.
+    foreach ( $xp->query( '//*[contains(concat(" ", normalize-space(@class), " "), " product-category ")]//a[@href]' ) as $a ) {
+        $url = $resolve( $a->getAttribute( 'href' ) );
+        if ( $url && $url !== $base_url ) $result['categories'][$url] = trim( sanitize_text_field( $a->textContent ) );
+    }
+    libxml_clear_errors(); libxml_use_internal_errors( $previous );
+    return $result;
+}
+
+/** Return true only when the source positively identifies the product as in stock. */
+function woocomport_is_in_stock( $html, $item = array() ) {
+    $availability = strtolower( (string) ( $item['availability'] ?? '' ) );
+    if ( $availability ) {
+        if ( strpos( $availability, 'outofstock' ) !== false || strpos( $availability, 'soldout' ) !== false ) return false;
+        if ( strpos( $availability, 'instock' ) !== false || strpos( $availability, 'limitedavailability' ) !== false || strpos( $availability, 'preorder' ) !== false ) return true;
+    }
+    $lower = strtolower( (string) $html );
+    if ( preg_match( '/\\b(outofstock|out-of-stock|stockout|sold-out|soldout)\\b/u', $lower ) || preg_match( '/ناموجود|اتمام\\s*موجودی|تمام\\s*شد/u', $html ) ) return false;
+    if ( preg_match( '/\\b(instock|in-stock|available-on-backorder)\\b/u', $lower ) || preg_match( '/class=["\\'][^"\\']*\\binstock\\b/u', $lower ) ) return true;
+    if ( preg_match( '/موجود\\s*در\\s*انبار|موجود\\s*است|آماده\\s*ارسال/u', $html ) && ! preg_match( '/ناموجود|اتمام\\s*موجودی/u', $html ) ) return true;
+    return false;
+}
+
+/** Crawl only WooCommerce product cards and nested product-category cards. */
+function woocomport_crawl_categories( $root_url, $max_pages = 30, $max_products = 200 ) {
+    $queue = array( $root_url );
+    $visited = array();
+    $products = array();
+    while ( $queue && count( $visited ) < $max_pages && count( $products ) < $max_products ) {
+        $category_url = array_shift( $queue );
+        if ( isset( $visited[$category_url] ) ) continue;
+        $visited[$category_url] = true;
+        $html = woocomport_fetch_page( $category_url );
+        if ( is_wp_error( $html ) ) continue;
+        $parsed = woocomport_parse_listing( $html, $category_url );
+        foreach ( $parsed['categories'] as $child_url => $label ) {
+            if ( ! isset( $visited[$child_url] ) && ! in_array( $child_url, $queue, true ) && count( $visited ) + count( $queue ) < $max_pages ) $queue[] = $child_url;
+        }
+        foreach ( $parsed['products'] as $product_url => $label ) {
+            if ( isset( $products[$product_url] ) || count( $products ) >= $max_products ) continue;
+            $product_html = woocomport_fetch_page( $product_url );
+            if ( is_wp_error( $product_html ) ) continue;
+            $item = woocomport_extract_product( $product_html, $product_url );
+            // Reject category/ordinary pages: a real product needs structured Product data or product-page markup.
+            $is_product = ( ! empty( $item['name'] ) && ( stripos( $product_html, '"@type":"Product"' ) !== false || stripos( $product_html, '"@type": "Product"' ) !== false || preg_match( '/class=["\\'][^"\\']*\\bproduct\\b/u', $product_html ) || preg_match( '/woocommerce-product-gallery|single_add_to_cart_button|product_meta/u', $product_html ) ) );
+            if ( ! $is_product || ! woocomport_is_in_stock( $product_html, $item ) ) continue;
+            $item['problem'] = '';
+            $products[$product_url] = $item;
+        }
+    }
+    return array_values( $products );
+}
+
 function woocomport_import_product( $item ) {
     if ( ! class_exists( 'WooCommerce' ) ) return new WP_Error( 'no_wc', 'ووکامرس فعال نیست.' );
     $product = new WC_Product_Simple();
@@ -141,19 +232,10 @@ function woocomport_render_page() {
         $action = sanitize_key( wp_unslash( $_POST['woocomport_action'] ) );
         $source = isset( $_POST['source_url'] ) ? esc_url_raw( wp_unslash( $_POST['source_url'] ) ) : '';
         if ( 'scan' === $action ) {
-            $html = woocomport_fetch_page( $source );
-            if ( is_wp_error( $html ) ) $error = $html->get_error_message();
+            if ( ! wp_http_validate_url( $source ) ) $error = 'آدرس دسته‌بندی معتبر نیست.';
             else {
-                $links = woocomport_find_product_links( $html, $source );
-                foreach ( $links as $url => $label ) {
-                    $page = woocomport_fetch_page( $url );
-                    if ( is_wp_error( $page ) ) { $items[] = array( 'name'=>$label ?: $url, 'description'=>'', 'price'=>'', 'sku'=>'', 'image'=>'', 'url'=>$url, 'availability'=>'', 'problem'=>$page->get_error_message() ); continue; }
-                    $item = woocomport_extract_product( $page, $url );
-                    if ( ! $item['name'] ) $item['name'] = $label ?: $url;
-                    $item['problem'] = '';
-                    $items[] = $item;
-                }
-                if ( ! $items ) $error = 'محصولی در این صفحه پیدا نشد. ممکن است ساختار سایت مبدا متفاوت باشد.';
+                $items = woocomport_crawl_categories( $source, 30, 200 );
+                if ( ! $items ) $error = 'محصول موجودی پیدا نشد. این اسکن فقط کارت‌های محصول و زیرشاخه‌های مشخص‌شده را بررسی می‌کند؛ صفحات عادی نمایش داده نمی‌شوند و مواردی که موجودی‌شان قابل تأیید نباشد کنار گذاشته می‌شوند.';
             }
         } elseif ( 'import' === $action ) {
             $urls = isset( $_POST['selected_urls'] ) ? array_slice( array_map( 'esc_url_raw', (array) wp_unslash( $_POST['selected_urls'] ) ), 0, 20 ) : array();
@@ -162,7 +244,7 @@ function woocomport_render_page() {
                 $page = woocomport_fetch_page( $url );
                 if ( is_wp_error( $page ) ) { $failed++; continue; }
                 $item = woocomport_extract_product( $page, $url );
-                if ( empty( $item['name'] ) ) { $failed++; continue; }
+                if ( empty( $item['name'] ) || ! woocomport_is_in_stock( $page, $item ) ) { $failed++; continue; }
                 $result = woocomport_import_product( $item );
                 if ( is_wp_error( $result ) ) $failed++; else $success++;
             }
@@ -174,7 +256,7 @@ function woocomport_render_page() {
     echo '<div class="wrap woocomport-wrap" dir="rtl"><style>
     .woocomport-wrap{max-width:1200px}.wcport-head{background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:22px;margin:18px 0}.wcport-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.wcport-stat{background:#fff;border:1px solid #dcdcde;border-radius:10px;padding:16px}.wcport-stat b{display:block;font-size:24px;margin-top:7px;color:#1d4e89}.wcport-item{display:grid;grid-template-columns:24px 82px minmax(180px,1fr) 130px 115px 130px;align-items:center;gap:14px;background:#fff;border:1px solid #dcdcde;border-radius:10px;padding:12px;margin:10px 0}.wcport-item img{width:78px;height:78px;object-fit:contain;background:#f6f7f7;border-radius:8px}.wcport-item .muted{color:#646970;font-size:12px;overflow-wrap:anywhere}.wcport-price{font-weight:700}.wcport-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0}.wcport-btn{background:#2271b1!important;color:#fff!important;border:0!important;padding:7px 16px!important;height:auto!important}.wcport-error{color:#b32d2e}.wcport-empty{background:#fff;padding:24px;border:1px dashed #c3c4c7;border-radius:10px;text-align:center}@media(max-width:900px){.wcport-stats{grid-template-columns:repeat(2,1fr)}.wcport-item{grid-template-columns:24px 64px 1fr;gap:9px}.wcport-item img{width:60px;height:60px}.wcport-extra{grid-column:3}.wcport-item .button{grid-column:3;justify-self:start}}
     </style>';
-    echo '<div class="wcport-head"><h1>WooComPort | انتقال محصولات به فروشگاه</h1><p>آدرس صفحه دسته‌بندی یا فهرست محصولات فروشگاه مبدا را وارد کن. افزونه تا ۲۰ محصول را بررسی می‌کند؛ سپس می‌توانی موارد دلخواه را انتخاب و به‌صورت پیش‌نویس وارد ووکامرس کنی.</p>';
+    echo '<div class="wcport-head"><h1>WooComPort | انتقال محصولات به فروشگاه</h1><p>آدرس دسته‌بندی اصلی را وارد کن. فقط کارت‌های محصول موجود و زیرشاخه‌های دسته‌بندی به‌صورت خودکار بررسی می‌شوند؛ صفحات عادی و محصولات ناموجود نمایش داده نمی‌شوند.</p>';
     if ( $notice ) echo '<div class="notice notice-success"><p>' . esc_html( $notice ) . '</p></div>';
     if ( $error ) echo '<div class="notice notice-error"><p>' . esc_html( $error ) . '</p></div>';
     echo '<form method="post">'; wp_nonce_field( 'woocomport_action', 'woocomport_nonce' );
@@ -195,9 +277,9 @@ function woocomport_render_page() {
             echo '<div class="wcport-extra"><a class="button" href="' . esc_url( $item['url'] ) . '" target="_blank" rel="noopener">مشاهده محصول</a></div></div>';
         }
         echo '<div class="wcport-toolbar"><button type="submit" class="button button-primary wcport-btn">انتقال محصولات انتخاب‌شده به سایتم</button></div></form>';
-        echo '<script>(function(){var all=document.getElementById("wcport-all"),checks=[].slice.call(document.querySelectorAll(".wcport-check")),count=document.getElementById("wcport-count");function update(){var n=checks.filter(function(c){return c.checked;}).length;count.textContent=n+" محصول انتخاب شده";if(n>20){count.style.color="#b32d2e";count.textContent="حداکثر ۲۰ محصول؛ "+n+" مورد انتخاب شده";}else{count.style.color="";}}if(all){all.addEventListener("change",function(){checks.forEach(function(c){if(!c.disabled)c.checked=all.checked;});update();});}checks.forEach(function(c){c.addEventListener("change",update);});update();})();</script>';
+        echo '<script>(function(){var all=document.getElementById("wcport-all"),checks=[].slice.call(document.querySelectorAll(".wcport-check")),count=document.getElementById("wcport-count");function update(){var n=checks.filter(function(c){return c.checked;}).length;count.textContent=n+" محصول انتخاب شده";if(n>20){count.style.color="#b32d2e";count.textContent="حداکثر ۲۰ محصول؛ "+n+" مورد انتخاب شده";}else{count.style.color="";}}if(all){all.addEventListener("change",function(){checks.forEach(function(c){if(!c.disabled)c.checked=all.checked;});update();});}checks.forEach(function(c){c.addEventListener("change",function(){if(checks.filter(function(x){return x.checked;}).length>20){c.checked=false;alert("در هر نوبت حداکثر ۲۰ محصول انتخاب کن.");}update();});});update();})();</script>';
     } else {
         echo '<div class="wcport-empty">هنوز محصولی نمایش داده نشده است. ابتدا آدرس صفحه دسته‌بندی را وارد و روی «اسکن و استخراج محصولات» بزن.</div>';
     }
-    echo '<hr><p><strong>WooComPort 1.1.0</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
+    echo '<hr><p><strong>WooComPort 1.2.0</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
 }
