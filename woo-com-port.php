@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.6.2
+ * Version: 1.6.3
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.6.2' );
+define( 'WOOCOMPORT_VERSION', '1.6.3' );
 
 add_action( 'admin_menu', function () {
     add_menu_page( 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page', 'dashicons-products', 56 );
@@ -91,15 +91,51 @@ function woocomport_extract_product( $html, $url ) {
             if ( $heading_text !== '' ) { $out['name'] = $heading_text; break; }
         }
     }
-    // Collect gallery images from common WooCommerce and storefront gallery containers.
-    $gallery_nodes = $xp->query('//*[contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-gallery") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-images") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"gallery") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"gallery")]//img | //img[contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"wp-post-image")]');
-    foreach ( $gallery_nodes as $img ) {
-        $src = $img->getAttribute('data-large_image') ?: ( $img->getAttribute('data-src') ?: ( $img->getAttribute('data-lazy-src') ?: $img->getAttribute('src') ) );
-        if ( ! $src && $img->getAttribute('srcset') ) { $srcset = explode(',', $img->getAttribute('srcset')); $last = trim(end($srcset)); $src = preg_split('/\\s+/', $last)[0] ?? ''; }
-        $src = esc_url_raw( WP_Http::make_absolute_url( $src, $url ) );
-        if ( $src && wp_http_validate_url($src) ) $out['gallery'][$src] = $src;
+    // Extract image URLs from metadata, structured data, lazy-load attributes, srcsets and linked image files.
+    foreach ( array( 'og:image', 'twitter:image', 'twitter:image:src' ) as $image_key ) {
+        if ( ! empty( $meta[$image_key] ) ) {
+            $src = esc_url_raw( WP_Http::make_absolute_url( $meta[$image_key], $url ) );
+            if ( $src && wp_http_validate_url( $src ) ) $out['gallery'][$src] = $src;
+        }
     }
-    if ( $out['image'] ) $out['gallery'][$out['image']] = $out['image'];
+    foreach ( $xp->query('//script[@type="application/ld+json"]') as $script ) {
+        $json = json_decode( $script->textContent, true );
+        $walk_images = function( $node ) use ( &$walk_images, &$out, $url ) {
+            if ( is_string( $node ) && preg_match('~\\.(jpg|jpeg|png|webp|gif)(?:[?#]|$)~i', $node) ) {
+                $src = esc_url_raw( WP_Http::make_absolute_url( $node, $url ) );
+                if ( $src && wp_http_validate_url( $src ) ) $out['gallery'][$src] = $src;
+            } elseif ( is_array( $node ) ) {
+                foreach ( $node as $value ) $walk_images( $value );
+            }
+        };
+        if ( is_array( $json ) ) $walk_images( $json );
+    }
+    $gallery_nodes = $xp->query('//img | //source[@srcset] | //a[@href]');
+    foreach ( $gallery_nodes as $node ) {
+        $tag = strtolower( $node->nodeName );
+        $candidates = array();
+        foreach ( array( 'data-large_image', 'data-large', 'data-original', 'data-zoom-image', 'data-full', 'data-src', 'data-lazy-src', 'data-original-src', 'src', 'href' ) as $attr ) {
+            $value = trim( $node->getAttribute( $attr ) );
+            if ( $value ) $candidates[] = $value;
+        }
+        foreach ( array( 'srcset', 'data-srcset' ) as $attr ) {
+            $srcset = trim( $node->getAttribute( $attr ) );
+            if ( $srcset ) foreach ( explode( ',', $srcset ) as $candidate ) {
+                $parts = preg_split('/\\s+/', trim($candidate));
+                if ( ! empty($parts[0]) ) $candidates[] = $parts[0];
+            }
+        }
+        foreach ( $candidates as $candidate ) {
+            if ( ! preg_match('~\\.(jpg|jpeg|png|webp|gif)(?:[?#]|$)~i', $candidate) && $tag !== 'img' && $tag !== 'source' ) continue;
+            $src = esc_url_raw( WP_Http::make_absolute_url( $candidate, $url ) );
+            if ( $src && wp_http_validate_url( $src ) ) $out['gallery'][$src] = $src;
+        }
+    }
+    if ( $out['image'] ) {
+        $src = esc_url_raw( WP_Http::make_absolute_url( $out['image'], $url ) );
+        if ( $src && wp_http_validate_url( $src ) ) $out['gallery'][$src] = $src;
+    }
+    $out['gallery'] = array_slice( $out['gallery'], 0, 30, true );
     // Extract visible product attributes from WooCommerce tables and definition lists.
     foreach ( $xp->query('//table[contains(@class,"woocommerce-product-attributes")]//tr | //table[contains(@class,"product-attributes")]//tr | //dl[contains(@class,"product")]/dt') as $row ) {
         if ( strtolower($row->nodeName) === 'tr' ) {
@@ -323,6 +359,7 @@ function woocomport_crawl_categories( $root_url, $max_pages = 30, $max_products 
  * Uses WordPress HTTP APIs so redirects, TLS, and response errors are handled consistently.
  */
 function woocomport_sideload_product_image( $image_url, $product_id, $product_name ) {
+    $GLOBALS['woocomport_current_source_url'] = ! empty( $GLOBALS['woocomport_import_source_url'] ) ? $GLOBALS['woocomport_import_source_url'] : home_url( '/' );
     $image_url = esc_url_raw( trim( (string) $image_url ) );
     if ( ! $image_url || ! wp_http_validate_url( $image_url ) ) {
         return new WP_Error( 'invalid_image_url', 'نشانی تصویر معتبر نیست.' );
@@ -333,7 +370,7 @@ function woocomport_sideload_product_image( $image_url, $product_id, $product_na
         'limit_response_size' => 15 * MB_IN_BYTES,
         'headers' => array(
             'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-            'Referer' => (string) ( wp_parse_url( $image_url, PHP_URL_SCHEME ) . '://' . wp_parse_url( $image_url, PHP_URL_HOST ) . '/' ),
+            'Referer' => ! empty( $GLOBALS['woocomport_current_source_url'] ) ? esc_url_raw( $GLOBALS['woocomport_current_source_url'] ) : home_url( '/' ),
             'Accept' => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
         ),
     ) );
@@ -371,8 +408,35 @@ function woocomport_sideload_product_image( $image_url, $product_id, $product_na
     return absint( $attachment_id );
 }
 
+/** Create/reuse a WooCommerce global attribute and its terms. */
+function woocomport_prepare_global_attribute( $label, $values ) {
+    $label = wc_clean( (string) $label );
+    $slug = wc_sanitize_taxonomy_name( $label );
+    if ( ! $slug ) return new WP_Error( 'invalid_attribute', 'نام ویژگی معتبر نیست.' );
+    $taxonomy = wc_attribute_taxonomy_name( $slug );
+    $attribute_id = wc_attribute_taxonomy_id_by_name( $taxonomy );
+    if ( ! $attribute_id ) {
+        $created = wc_create_attribute( array( 'name' => $label, 'slug' => $slug, 'type' => 'select', 'order_by' => 'menu_order', 'has_archives' => false ) );
+        if ( is_wp_error( $created ) ) return $created;
+        $attribute_id = absint( $created );
+        delete_transient( 'wc_attribute_taxonomies' );
+    }
+    if ( ! taxonomy_exists( $taxonomy ) ) {
+        register_taxonomy( $taxonomy, array( 'product' ), array( 'hierarchical' => false, 'show_ui' => false, 'query_var' => true, 'rewrite' => false ) );
+    }
+    $term_ids = array();
+    foreach ( array_unique( array_filter( array_map( 'wc_clean', (array) $values ) ) ) as $value ) {
+        $term = term_exists( $value, $taxonomy );
+        if ( ! $term ) $term = wp_insert_term( $value, $taxonomy );
+        if ( is_wp_error( $term ) ) continue;
+        $term_ids[] = absint( is_array( $term ) ? $term['term_id'] : $term );
+    }
+    return array( 'id' => $attribute_id, 'taxonomy' => $taxonomy, 'term_ids' => $term_ids );
+}
+
 function woocomport_import_product( $item ) {
     if ( ! class_exists( 'WooCommerce' ) ) return new WP_Error( 'no_wc', 'ووکامرس فعال نیست.' );
+    $GLOBALS['woocomport_import_source_url'] = esc_url_raw( $item['url'] ?? home_url( '/' ) );
     $has_variations = false;
     foreach ( (array)($item['variations'] ?? array()) as $candidate_variation ) { if ( ! empty($candidate_variation['attributes']) ) { $has_variations = true; break; } }
     $product = $has_variations ? new WC_Product_Variable() : new WC_Product_Simple();
@@ -380,26 +444,23 @@ function woocomport_import_product( $item ) {
     $product->set_status( 'draft' );
     $product->set_description( $item['description'] );
     $product->set_short_description( $item['short_description'] ?? '' );
-    if ( $has_variations ) {
-        $wc_attributes = array(); $position = 0;
-        foreach ( $item['attributes'] as $label => $options ) {
-            $attribute = new WC_Product_Attribute();
-            $attribute->set_id( 0 ); $attribute->set_name( sanitize_text_field($label) );
-            $attribute->set_options( array_values(array_unique(array_map('sanitize_text_field', (array)$options))) );
-            $attribute->set_position( $position++ ); $attribute->set_visible( true ); $attribute->set_variation( true );
-            $wc_attributes[] = $attribute;
-        }
-        $product->set_attributes( $wc_attributes );
-    } else {
-        foreach ( (array)($item['attributes'] ?? array()) as $label => $options ) {
-            $attribute = new WC_Product_Attribute();
-            $attribute->set_id(0); $attribute->set_name(sanitize_text_field($label));
-            $attribute->set_options(array_values(array_unique(array_map('sanitize_text_field',(array)$options))));
-            $attribute->set_position(count($wc_attributes ?? array())); $attribute->set_visible(true); $attribute->set_variation(false);
-            $wc_attributes[] = $attribute;
-        }
-        if ( ! empty($wc_attributes) ) $product->set_attributes($wc_attributes);
+    $wc_attributes = array();
+    $position = 0;
+    $attribute_taxonomies = array();
+    foreach ( (array) ( $item['attributes'] ?? array() ) as $label => $options ) {
+        $prepared = woocomport_prepare_global_attribute( $label, $options );
+        if ( is_wp_error( $prepared ) ) continue;
+        $attribute = new WC_Product_Attribute();
+        $attribute->set_id( $prepared['id'] );
+        $attribute->set_name( $prepared['taxonomy'] );
+        $attribute->set_options( $prepared['term_ids'] );
+        $attribute->set_position( $position++ );
+        $attribute->set_visible( true );
+        $attribute->set_variation( $has_variations );
+        $wc_attributes[] = $attribute;
+        $attribute_taxonomies[sanitize_title($label)] = $prepared['taxonomy'];
     }
+    if ( $wc_attributes ) $product->set_attributes( $wc_attributes );
     if ( ! $has_variations && $item['price'] !== '' ) $product->set_regular_price( wc_format_decimal( $item['price'] ) );
     if ( ! empty( $item['sku'] ) && ! wc_get_product_id_by_sku( $item['sku'] ) ) $product->set_sku( $item['sku'] );
     $id = $product->save();
@@ -414,7 +475,8 @@ function woocomport_import_product( $item ) {
             if ( ! empty($variation_data['sku']) && ! wc_get_product_id_by_sku($variation_data['sku']) ) $variation->set_sku(sanitize_text_field($variation_data['sku']));
             $variation_attrs = array();
             foreach ( (array)($variation_data['attributes'] ?? array()) as $label => $value ) {
-                $variation_attrs['attribute_' . sanitize_title($label)] = sanitize_title($value);
+                $taxonomy = $attribute_taxonomies[sanitize_title($label)] ?? '';
+                $variation_attrs[ $taxonomy ? 'attribute_' . $taxonomy : 'attribute_' . sanitize_title($label) ] = sanitize_title($value);
             }
             if ( $variation_attrs ) $variation->set_attributes($variation_attrs);
             $variation->save();
