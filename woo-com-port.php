@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.2.1
+ * Version: 1.3.0
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.2.1' );
+define( 'WOOCOMPORT_VERSION', '1.3.0' );
 
 add_action( 'admin_menu', function () {
     add_submenu_page( 'woocommerce', 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port', 'woocomport_render_page' );
@@ -149,6 +149,20 @@ function woocomport_parse_listing( $html, $base_url ) {
         $url = $resolve( $a->getAttribute( 'href' ) );
         if ( $url && $url !== $base_url ) $result['categories'][$url] = trim( sanitize_text_field( $a->textContent ) );
     }
+    // Support Technosun-style stores: product URLs use /p/ and category URLs use /c/.
+    // Restrict matching to these explicit route patterns so ordinary links and pagination are ignored.
+    foreach ( $xp->query( '//a[@href]' ) as $a ) {
+        $url = $resolve( $a->getAttribute( 'href' ) );
+        if ( ! $url ) continue;
+        $path = (string) wp_parse_url( $url, PHP_URL_PATH );
+        if ( preg_match( '~^/p/[0-9]+(?:/|$)~i', $path ) ) {
+            $label = trim( sanitize_text_field( $a->textContent ) );
+            if ( ! isset( $result['products'][$url] ) ) $result['products'][$url] = $label;
+        } elseif ( preg_match( '~^/c/[^/]+/?$~i', $path ) && untrailingslashit( $url ) !== untrailingslashit( $base_url ) ) {
+            $label = trim( sanitize_text_field( $a->textContent ) );
+            if ( $label && ! isset( $result['categories'][$url] ) ) $result['categories'][$url] = $label;
+        }
+    }
     // Some WooCommerce themes put the category class on the card, not its anchor.
     foreach ( $xp->query( '//*[contains(concat(" ", normalize-space(@class), " "), " product-category ")]//a[@href]' ) as $a ) {
         $url = $resolve( $a->getAttribute( 'href' ) );
@@ -169,6 +183,11 @@ function woocomport_is_in_stock( $html, $item = array() ) {
     if ( preg_match( '/\\b(outofstock|out-of-stock|stockout|sold-out|soldout)\\b/u', $lower ) || preg_match( '/ناموجود|اتمام\\s*موجودی|تمام\\s*شد/u', $html ) ) return false;
     if ( preg_match( '/\b(outofstock|out-of-stock|stockout|sold-out|soldout)\b/u', $lower ) || preg_match( '/ناموجود|اتمام\s*موجودی|تمام\s*شد/u', $html ) ) return false;
     if ( preg_match( '/\b(instock|in-stock|available-on-backorder)\b/u', $lower ) || preg_match( '/class="[^"]*\binstock\b/u', $lower ) ) return true;
+    // Explicit Persian storefront signals. A visible add-to-cart control is positive stock evidence.
+    if ( preg_match( '/افزودن\s*به\s*سبد\s*خرید|افزودن\s*به\s*سبد|موجود\s*در\s*انبار|موجود\s*است/u', $html ) ) {
+        if ( ! preg_match( '/ناموجود|اتمام\s*موجودی|تمام\s*شد/u', $html ) ) return true;
+    }
+    if ( preg_match( '/<button[^>]*(?:add-to-cart|add_to_cart)[^>]*>.*?<\/button>/is', $html ) && ! preg_match( '/<button[^>]*disabled[^>]*(?:add-to-cart|add_to_cart)/is', $html ) ) return true;
     return false;
 }
 
@@ -193,7 +212,9 @@ function woocomport_crawl_categories( $root_url, $max_pages = 30, $max_products 
             if ( is_wp_error( $product_html ) ) continue;
             $item = woocomport_extract_product( $product_html, $product_url );
             // Reject category/ordinary pages: a real product needs structured Product data or product-page markup.
-            $is_product = ( ! empty( $item['name'] ) && ( stripos( $product_html, '"@type":"Product"' ) !== false || stripos( $product_html, '"@type": "Product"' ) !== false || preg_match( '/class="[^"]*\bproduct\b/u', $product_html ) || preg_match( '/woocommerce-product-gallery|single_add_to_cart_button|product_meta/u', $product_html ) ) );
+            $product_path = (string) wp_parse_url( $product_url, PHP_URL_PATH );
+            $is_technosun_product = (bool) preg_match( '~^/p/[0-9]+(?:/|$)~i', $product_path );
+            $is_product = ( ! empty( $item['name'] ) && ( $is_technosun_product || stripos( $product_html, '"@type":"Product"' ) !== false || stripos( $product_html, '"@type": "Product"' ) !== false || preg_match( '/class="[^"]*\bproduct\b/u', $product_html ) || preg_match( '/woocommerce-product-gallery|single_add_to_cart_button|product_meta/u', $product_html ) ) );
             if ( ! $is_product || ! woocomport_is_in_stock( $product_html, $item ) ) continue;
             $item['problem'] = '';
             $products[$product_url] = $item;
@@ -281,5 +302,5 @@ function woocomport_render_page() {
     } else {
         echo '<div class="wcport-empty">هنوز محصولی نمایش داده نشده است. ابتدا آدرس صفحه دسته‌بندی را وارد و روی «اسکن و استخراج محصولات» بزن.</div>';
     }
-    echo '<hr><p><strong>WooComPort 1.2.1</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
+    echo '<hr><p><strong>WooComPort 1.3.0</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
 }
