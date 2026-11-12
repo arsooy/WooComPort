@@ -167,8 +167,8 @@ function woocomport_is_in_stock( $html, $item = array() ) {
     }
     $lower = strtolower( (string) $html );
     if ( preg_match( '/\\b(outofstock|out-of-stock|stockout|sold-out|soldout)\\b/u', $lower ) || preg_match( '/ناموجود|اتمام\\s*موجودی|تمام\\s*شد/u', $html ) ) return false;
-    if ( preg_match( '/\\b(instock|in-stock|available-on-backorder)\\b/u', $lower ) || preg_match( '/class=["\\'][^"\\']*\\binstock\\b/u', $lower ) ) return true;
-    if ( preg_match( '/موجود\\s*در\\s*انبار|موجود\\s*است|آماده\\s*ارسال/u', $html ) && ! preg_match( '/ناموجود|اتمام\\s*موجودی/u', $html ) ) return true;
+    if ( preg_match( '/\b(outofstock|out-of-stock|stockout|sold-out|soldout)\b/u', $lower ) || preg_match( '/ناموجود|اتمام\s*موجودی|تمام\s*شد/u', $html ) ) return false;
+    if ( preg_match( '/\b(instock|in-stock|available-on-backorder)\b/u', $lower ) || preg_match( '/class="[^"]*\binstock\b/u', $lower ) ) return true;
     return false;
 }
 
@@ -193,7 +193,7 @@ function woocomport_crawl_categories( $root_url, $max_pages = 30, $max_products 
             if ( is_wp_error( $product_html ) ) continue;
             $item = woocomport_extract_product( $product_html, $product_url );
             // Reject category/ordinary pages: a real product needs structured Product data or product-page markup.
-            $is_product = ( ! empty( $item['name'] ) && ( stripos( $product_html, '"@type":"Product"' ) !== false || stripos( $product_html, '"@type": "Product"' ) !== false || preg_match( '/class=["\\'][^"\\']*\\bproduct\\b/u', $product_html ) || preg_match( '/woocommerce-product-gallery|single_add_to_cart_button|product_meta/u', $product_html ) ) );
+            $is_product = ( ! empty( $item['name'] ) && ( stripos( $product_html, '"@type":"Product"' ) !== false || stripos( $product_html, '"@type": "Product"' ) !== false || preg_match( '/class="[^"]*\bproduct\b/u', $product_html ) || preg_match( '/woocommerce-product-gallery|single_add_to_cart_button|product_meta/u', $product_html ) ) );
             if ( ! $is_product || ! woocomport_is_in_stock( $product_html, $item ) ) continue;
             $item['problem'] = '';
             $products[$product_url] = $item;
