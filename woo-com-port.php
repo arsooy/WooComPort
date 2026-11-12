@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,10 +11,13 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.5.0' );
+define( 'WOOCOMPORT_VERSION', '1.6.0' );
 
 add_action( 'admin_menu', function () {
     add_submenu_page( 'woocommerce', 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port', 'woocomport_render_page' );
+    add_submenu_page( 'woocommerce', 'ورود تکی', 'ورود تکی', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page' );
+    add_submenu_page( 'woocommerce', 'ورود دسته‌بندی', 'ورود دسته‌بندی', 'manage_woocommerce', 'woo-com-port-category', 'woocomport_render_page' );
+    add_submenu_page( 'woocommerce', 'گزارشات', 'گزارشات', 'manage_woocommerce', 'woo-com-port-reports', 'woocomport_render_reports_page' );
 } );
 
 function woocomport_fetch_page( $url ) {
@@ -177,7 +180,8 @@ function woocomport_extract_product( $html, $url ) {
     $out['description'] = wp_kses_post( html_entity_decode( (string) $out['description'], ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
     $out['price'] = woocomport_normalize_number( $out['price'] );
     $out['sku'] = sanitize_text_field( (string) $out['sku'] );
-    $out['image'] = esc_url_raw( (string) $out['image'] );\n    $out['gallery'] = array_values( array_unique( array_filter( $out['gallery'] ) ) );
+    $out['image'] = esc_url_raw( (string) $out['image'] );
+    $out['gallery'] = array_values( array_unique( array_filter( $out['gallery'] ) ) );
     libxml_clear_errors(); libxml_use_internal_errors( $previous );
     return $out;
 }
@@ -316,7 +320,8 @@ function woocomport_crawl_categories( $root_url, $max_pages = 30, $max_products 
 
 function woocomport_import_product( $item ) {
     if ( ! class_exists( 'WooCommerce' ) ) return new WP_Error( 'no_wc', 'ووکامرس فعال نیست.' );
-    $has_variations = false;\n    foreach ( (array)($item['variations'] ?? array()) as $candidate_variation ) { if ( ! empty($candidate_variation['attributes']) ) { $has_variations = true; break; } }
+    $has_variations = false;
+    foreach ( (array)($item['variations'] ?? array()) as $candidate_variation ) { if ( ! empty($candidate_variation['attributes']) ) { $has_variations = true; break; } }
     $product = $has_variations ? new WC_Product_Variable() : new WC_Product_Simple();
     $product->set_name( $item['name'] );
     $product->set_status( 'draft' );
@@ -364,6 +369,12 @@ function woocomport_import_product( $item ) {
         WC_Product_Variable::sync($id);
     }
     update_post_meta( $id, '_woocomport_source_url', esc_url_raw( $item['url'] ) );
+    update_post_meta( $id, '_woocomport_imported_at', current_time( 'mysql' ) );
+    update_post_meta( $id, '_woocomport_import_version', WOOCOMPORT_VERSION );
+    update_post_meta( $id, '_woocomport_import_type', ! empty( $item['variations'] ) ? 'variable' : 'simple' );
+    update_post_meta( $id, '_woocomport_gallery_count', count( (array) ( $item['gallery'] ?? array() ) ) );
+    update_post_meta( $id, '_woocomport_attributes_count', count( (array) ( $item['attributes'] ?? array() ) ) );
+    update_post_meta( $id, '_woocomport_variations_count', count( (array) ( $item['variations'] ?? array() ) ) );
     if ( ! empty( $item['gallery'] ) || ! empty( $item['image'] ) ) {
         require_once ABSPATH . 'wp-admin/includes/media.php';
         require_once ABSPATH . 'wp-admin/includes/file.php';
@@ -373,6 +384,98 @@ function woocomport_import_product( $item ) {
         else update_post_meta( $id, '_woocomport_image_import_error', $attachment->get_error_message() );
     }
     return $id;
+}
+
+
+/** Shared admin page header and navigation. */
+function woocomport_admin_header( $active ) {
+    echo '<div class="wrap woocomport-wrap" dir="rtl"><style>
+    .woocomport-wrap{max-width:1200px}.wcport-head{background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:22px;margin:18px 0}.wcport-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.wcport-stat{background:#fff;border:1px solid #dcdcde;border-radius:10px;padding:16px}.wcport-stat b{display:block;font-size:24px;margin-top:7px;color:#1d4e89}.wcport-btn{background:#2271b1!important;color:#fff!important;border:0!important;padding:7px 16px!important;height:auto!important}.wcport-empty{background:#fff;padding:24px;border:1px dashed #c3c4c7;border-radius:10px;text-align:center}.wcport-table{width:100%;border-collapse:collapse;background:#fff}.wcport-table th,.wcport-table td{padding:11px;border-bottom:1px solid #e2e4e7;text-align:right;vertical-align:top}.wcport-table th{background:#f6f7f7}.wcport-muted{color:#646970;font-size:12px;overflow-wrap:anywhere}@media(max-width:800px){.wcport-stats{grid-template-columns:repeat(2,1fr)}.wcport-table{display:block;overflow:auto}}
+    </style><h1>WooComPort</h1><nav class="nav-tab-wrapper">';
+    $tabs = array( 'single'=>array('ورود تکی','admin.php?page=woo-com-port-single'), 'category'=>array('ورود دسته‌بندی','admin.php?page=woo-com-port-category'), 'reports'=>array('گزارشات','admin.php?page=woo-com-port-reports') );
+    foreach ( $tabs as $key => $tab ) echo '<a class="nav-tab ' . ( $active === $key ? 'nav-tab-active' : '' ) . '" href="' . esc_url( admin_url($tab[1]) ) . '">' . esc_html($tab[0]) . '</a>';
+    echo '</nav>';
+}
+function woocomport_render_single_page() {
+    if ( ! current_user_can('manage_woocommerce') ) wp_die('دسترسی غیرمجاز');
+    $notice = ''; $error = ''; $item = null; $url = '';
+    if ( isset($_POST['woocomport_single_action']) ) {
+        check_admin_referer('woocomport_single','woocomport_single_nonce');
+        $action = sanitize_key(wp_unslash($_POST['woocomport_single_action']));
+        $url = isset($_POST['product_url']) ? esc_url_raw(wp_unslash($_POST['product_url'])) : '';
+        if ( ! wp_http_validate_url($url) ) $error = 'آدرس محصول معتبر نیست.';
+        else {
+            $html = woocomport_fetch_page($url);
+            if ( is_wp_error($html) ) $error = $html->get_error_message();
+            else {
+                $item = woocomport_extract_product($html,$url);
+                if ( empty($item['name']) ) $error = 'نام محصول از صفحه پیدا نشد؛ لطفاً لینک مستقیم صفحه محصول را وارد کن.';
+                elseif ( 'import' === $action ) {
+                    if ( ! woocomport_is_in_stock($html,$item) ) $error = 'موجودی محصول در سایت مبدا قابل تأیید نیست؛ برای جلوگیری از انتقال اشتباه، ذخیره انجام نشد.';
+                    else {
+                        $saved = woocomport_import_product($item);
+                        if ( is_wp_error($saved) ) $error = $saved->get_error_message();
+                        else { $notice = 'محصول با موفقیت به‌صورت پیش‌نویس منتقل شد. شناسه محصول: ' . absint($saved); $item = null; }
+                    }
+                } elseif ( 'preview' === $action && ! woocomport_is_in_stock($html,$item) ) {
+                    $error = 'اطلاعات استخراج شد، اما موجودی در مبدا قابل تأیید نیست. قبل از انتقال، موجودی را بررسی کن.';
+                }
+            }
+        }
+    }
+    woocomport_admin_header('single');
+    echo '<div class="wcport-head"><h2>ورود تکی محصول</h2><p>لینک مستقیم یک محصول از سایت مبدا را وارد کن. ابتدا اطلاعات استخراج‌شده نمایش داده می‌شود و فقط با زدن دکمه انتقال، محصول به‌صورت پیش‌نویس ذخیره خواهد شد.</p>';
+    if($notice) echo '<div class="notice notice-success"><p>'.esc_html($notice).'</p></div>';
+    if($error) echo '<div class="notice notice-error"><p>'.esc_html($error).'</p></div>';
+    echo '<form method="post">'; wp_nonce_field('woocomport_single','woocomport_single_nonce');
+    echo '<p><input class="large-text" type="url" name="product_url" required dir="ltr" placeholder="https://example.com/product/..." value="'.esc_attr($url).'"></p><button class="button button-primary wcport-btn" name="woocomport_single_action" value="preview">استخراج و نمایش اطلاعات</button>';
+    if($item) echo ' <button class="button button-primary wcport-btn" name="woocomport_single_action" value="import">انتقال محصول به سایت</button>';
+    echo '</form></div>';
+    if($item) {
+        echo '<div class="wcport-head">';
+        if(!empty($item['image'])) echo '<img src="'.esc_url($item['image']).'" style="max-width:150px;max-height:150px;object-fit:contain;float:left;margin:0 15px 10px 0">';
+        echo '<h2>'.esc_html($item['name']).'</h2><p>قیمت: '.($item['price']!==''?esc_html(number_format_i18n((float)$item['price'])):'نامشخص').'</p>';
+        echo '<p>کد محصول: '.esc_html($item['sku']?:'ثبت نشده').' | تصاویر گالری: '.count((array)$item['gallery']).' | ویژگی‌ها: '.count((array)$item['attributes']).' | حالت‌های متغیر: '.count((array)$item['variations']).'</p>';
+        echo '<h3>توضیح کوتاه</h3>'.wp_kses_post($item['short_description']).'<h3>توضیحات کامل</h3>'.wp_kses_post($item['description']);
+        if(!empty($item['attributes'])) { echo '<h3>ویژگی‌ها</h3><ul>'; foreach($item['attributes'] as $label=>$values) echo '<li><strong>'.esc_html($label).':</strong> '.esc_html(implode('،',(array)$values)).'</li>'; echo '</ul>'; }
+        if(!empty($item['variations'])) { echo '<h3>قیمت‌ها و حالت‌ها</h3><ul>'; foreach($item['variations'] as $v) echo '<li>'.esc_html(wp_json_encode($v,JSON_UNESCAPED_UNICODE)).'</li>'; echo '</ul>'; }
+        if(count((array)$item['gallery'])>1) { echo '<h3>گالری تصاویر</h3>'; foreach($item['gallery'] as $img) echo '<img src="'.esc_url($img).'" style="width:85px;height:85px;object-fit:contain;margin:5px;border:1px solid #ddd">'; }
+        echo '<div style="clear:both"></div></div>';
+    }
+    echo '<hr><p><strong>WooComPort '.esc_html(WOOCOMPORT_VERSION).'</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
+}
+function woocomport_render_reports_page() {
+    if ( ! current_user_can('manage_woocommerce') ) wp_die('دسترسی غیرمجاز');
+    $ids = get_posts(array('post_type'=>'product','post_status'=>array('publish','draft','pending','private','future'),'numberposts'=>-1,'fields'=>'ids','meta_key'=>'_woocomport_imported_at','orderby'=>'date','order'=>'DESC'));
+    $total = count($ids); $drafts=0; $published=0; $variables=0; $simple=0; $gallery=0; $attribute_total=0; $variation_total=0;
+    foreach($ids as $id) {
+        $status=get_post_status($id); if($status==='publish') $published++; else $drafts++;
+        $type=get_post_meta($id,'_woocomport_import_type',true); if($type==='variable') $variables++; else $simple++;
+        $gallery += (int)get_post_meta($id,'_woocomport_gallery_count',true);
+        $attribute_total += (int)get_post_meta($id,'_woocomport_attributes_count',true);
+        $variation_total += (int)get_post_meta($id,'_woocomport_variations_count',true);
+    }
+    woocomport_admin_header('reports');
+    echo '<div class="wcport-head"><h2>گزارش جامع انتقال محصولات</h2><p>فهرست محصولاتی که توسط WooComPort وارد فروشگاه شده‌اند، همراه با تاریخ انتقال و جزئیات ثبت‌شده.</p>';
+    echo '<div class="wcport-stats"><div class="wcport-stat">کل محصولات واردشده<b>'.number_format_i18n($total).'</b></div><div class="wcport-stat">پیش‌نویس‌ها<b>'.number_format_i18n($drafts).'</b></div><div class="wcport-stat">منتشرشده‌ها<b>'.number_format_i18n($published).'</b></div><div class="wcport-stat">محصولات متغیر<b>'.number_format_i18n($variables).'</b></div><div class="wcport-stat">محصولات ساده<b>'.number_format_i18n($simple).'</b></div><div class="wcport-stat">تصاویر گالری<b>'.number_format_i18n($gallery).'</b></div><div class="wcport-stat">ویژگی‌های ثبت‌شده<b>'.number_format_i18n($attribute_total).'</b></div><div class="wcport-stat">حالت‌های متغیر<b>'.number_format_i18n($variation_total).'</b></div></div></div>';
+    if(!$ids) echo '<div class="wcport-empty">هنوز محصولی با این نسخه از WooComPort وارد نشده است. گزارش انتقال‌های جدید از این پس در این صفحه ثبت می‌شود.</div>';
+    else {
+        echo '<table class="wcport-table"><thead><tr><th>محصول</th><th>تاریخ ورود</th><th>نوع</th><th>قیمت</th><th>ویژگی‌ها</th><th>گالری</th><th>وضعیت</th><th>منبع</th></tr></thead><tbody>';
+        foreach($ids as $id) {
+            $p=wc_get_product($id); if(!$p) continue;
+            $date=get_post_meta($id,'_woocomport_imported_at',true); if(!$date) $date=get_post_field('post_date',$id);
+            $type=$p->is_type('variable')?'متغیر':'ساده';
+            $price=$p->is_type('variable')?$p->get_price_html():$p->get_price();
+            $status=get_post_status($id); $status_label=$status==='publish'?'منتشرشده':($status==='draft'?'پیش‌نویس':$status);
+            $source=get_post_meta($id,'_woocomport_source_url',true);
+            echo '<tr><td><strong><a href="'.esc_url(get_edit_post_link($id)).'">'.esc_html($p->get_name()).'</a></strong><div class="wcport-muted">شناسه: '.absint($id).' | SKU: '.esc_html($p->get_sku()?:'—').'</div></td>';
+            echo '<td>'.esc_html(mysql2date('Y/m/d H:i',$date)).'</td><td>'.$type.'</td><td>'.wp_kses_post($price?:'—').'</td>';
+            echo '<td>'.absint(get_post_meta($id,'_woocomport_attributes_count',true)).'</td><td>'.absint(get_post_meta($id,'_woocomport_gallery_count',true)).'</td><td>'.esc_html($status_label).'</td>';
+            echo '<td>'.($source?'<a href="'.esc_url($source).'" target="_blank" rel="noopener">مشاهده مبدا</a>':'—').'</td></tr>';
+        }
+        echo '</tbody></table>';
+    }
+    echo '<hr><p><strong>WooComPort '.esc_html(WOOCOMPORT_VERSION).'</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
 }
 
 function woocomport_render_page() {
@@ -432,5 +535,5 @@ function woocomport_render_page() {
     } else {
         echo '<div class="wcport-empty">هنوز محصولی نمایش داده نشده است. ابتدا آدرس صفحه دسته‌بندی را وارد و روی «اسکن و استخراج محصولات» بزن.</div>';
     }
-    echo '<hr><p><strong>WooComPort 1.5.0</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
+    echo '<hr><p><strong>WooComPort '.esc_html(WOOCOMPORT_VERSION).'</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
 }
