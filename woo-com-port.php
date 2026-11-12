@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.6.1
+ * Version: 1.6.2
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.6.1' );
+define( 'WOOCOMPORT_VERSION', '1.6.2' );
 
 add_action( 'admin_menu', function () {
     add_menu_page( 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page', 'dashicons-products', 56 );
@@ -318,6 +318,59 @@ function woocomport_crawl_categories( $root_url, $max_pages = 30, $max_products 
     return array_values( $products );
 }
 
+/**
+ * Download a remote product image and attach it to a WooCommerce product.
+ * Uses WordPress HTTP APIs so redirects, TLS, and response errors are handled consistently.
+ */
+function woocomport_sideload_product_image( $image_url, $product_id, $product_name ) {
+    $image_url = esc_url_raw( trim( (string) $image_url ) );
+    if ( ! $image_url || ! wp_http_validate_url( $image_url ) ) {
+        return new WP_Error( 'invalid_image_url', 'نشانی تصویر معتبر نیست.' );
+    }
+    $response = wp_safe_remote_get( $image_url, array(
+        'timeout' => 35,
+        'redirection' => 5,
+        'limit_response_size' => 15 * MB_IN_BYTES,
+        'headers' => array(
+            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+            'Referer' => (string) ( wp_parse_url( $image_url, PHP_URL_SCHEME ) . '://' . wp_parse_url( $image_url, PHP_URL_HOST ) . '/' ),
+            'Accept' => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        ),
+    ) );
+    if ( is_wp_error( $response ) ) return $response;
+    $code = (int) wp_remote_retrieve_response_code( $response );
+    if ( $code < 200 || $code >= 300 ) {
+        return new WP_Error( 'image_http_error', 'سرور تصویر پاسخ HTTP ' . $code . ' برگرداند.' );
+    }
+    $body = wp_remote_retrieve_body( $response );
+    $type = strtolower( trim( (string) wp_remote_retrieve_header( $response, 'content-type' ) ) );
+    if ( ! $body || strpos( $type, 'image/' ) !== 0 ) {
+        return new WP_Error( 'invalid_image_response', 'پاسخ دریافتی فایل تصویر نبود (' . ( $type ?: 'نوع فایل نامشخص' ) . ').' );
+    }
+    $path = (string) wp_parse_url( $image_url, PHP_URL_PATH );
+    $filename = sanitize_file_name( rawurldecode( basename( $path ) ) );
+    if ( ! $filename || strpos( $filename, '.' ) === false ) {
+        $extension = 'image/jpeg';
+        if ( strpos( $type, 'png' ) !== false ) $extension = 'image/png';
+        elseif ( strpos( $type, 'webp' ) !== false ) $extension = 'image/webp';
+        elseif ( strpos( $type, 'gif' ) !== false ) $extension = 'image/gif';
+        $filename = 'woocomport-' . wp_generate_password( 8, false ) . '.' . ( $extension === 'image/png' ? 'png' : ( $extension === 'image/webp' ? 'webp' : ( $extension === 'image/gif' ? 'gif' : 'jpg' ) ) );
+    }
+    $tmp = wp_tempnam( $filename );
+    if ( ! $tmp ) return new WP_Error( 'image_temp_error', 'ساخت فایل موقت تصویر ناموفق بود.' );
+    if ( false === file_put_contents( $tmp, $body ) ) {
+        @unlink( $tmp );
+        return new WP_Error( 'image_write_error', 'ذخیره موقت تصویر ناموفق بود.' );
+    }
+    $file = array( 'name' => $filename, 'tmp_name' => $tmp );
+    $attachment_id = media_handle_sideload( $file, $product_id, $product_name );
+    if ( is_wp_error( $attachment_id ) ) {
+        @unlink( $tmp );
+        return $attachment_id;
+    }
+    return absint( $attachment_id );
+}
+
 function woocomport_import_product( $item ) {
     if ( ! class_exists( 'WooCommerce' ) ) return new WP_Error( 'no_wc', 'ووکامرس فعال نیست.' );
     $has_variations = false;
@@ -381,17 +434,24 @@ function woocomport_import_product( $item ) {
         require_once ABSPATH . 'wp-admin/includes/image.php';
         $image_urls = array_values( array_unique( array_filter( array_merge( array( $item['image'] ?? '' ), (array) ( $item['gallery'] ?? array() ) ) ) ) );
         $attachment_ids = array();
+        $image_errors = array();
         foreach ( $image_urls as $image_url ) {
-            $attachment = media_sideload_image( esc_url_raw( $image_url ), $id, $item['name'], 'id' );
-            if ( ! is_wp_error( $attachment ) ) $attachment_ids[] = absint( $attachment );
-            elseif ( empty( $item['image_import_error'] ) ) $item['image_import_error'] = $attachment->get_error_message();
+            $attachment = woocomport_sideload_product_image( $image_url, $id, $item['name'] );
+            if ( ! is_wp_error( $attachment ) && $attachment ) {
+                $attachment_ids[] = absint( $attachment );
+            } else {
+                $image_errors[] = esc_url_raw( $image_url ) . ': ' . ( is_wp_error( $attachment ) ? $attachment->get_error_message() : 'تصویر به کتابخانه رسانه اضافه نشد.' );
+            }
         }
         if ( ! empty( $attachment_ids ) ) {
             set_post_thumbnail( $id, $attachment_ids[0] );
-            if ( count( $attachment_ids ) > 1 ) update_post_meta( $id, '_product_image_gallery', implode( ',', array_slice( $attachment_ids, 1 ) ) );
-        } elseif ( ! empty( $item['image_import_error'] ) ) {
-            update_post_meta( $id, '_woocomport_image_import_error', $item['image_import_error'] );
+            $gallery_ids = array_slice( $attachment_ids, 1 );
+            if ( $gallery_ids ) update_post_meta( $id, '_product_image_gallery', implode( ',', $gallery_ids ) );
+            else delete_post_meta( $id, '_product_image_gallery' );
         }
+        update_post_meta( $id, '_woocomport_gallery_count', count( $attachment_ids ) );
+        if ( $image_errors ) update_post_meta( $id, '_woocomport_image_import_error', implode( "\n", $image_errors ) );
+        else delete_post_meta( $id, '_woocomport_image_import_error' );
     }
     return $id;
 }
