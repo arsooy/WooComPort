@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.4.0
+ * Version: 1.5.0
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.4.0' );
+define( 'WOOCOMPORT_VERSION', '1.5.0' );
 
 add_action( 'admin_menu', function () {
     add_submenu_page( 'woocommerce', 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port', 'woocomport_render_page' );
@@ -37,7 +37,7 @@ function woocomport_normalize_number( $value ) {
 }
 
 function woocomport_extract_product( $html, $url ) {
-    $out = array( 'name'=>'', 'short_description'=>'', 'description'=>'', 'price'=>'', 'sku'=>'', 'image'=>'', 'url'=>$url, 'availability'=>'' );
+    $out = array( 'name'=>'', 'short_description'=>'', 'description'=>'', 'price'=>'', 'sku'=>'', 'image'=>'', 'url'=>$url, 'availability'=>'', 'gallery'=>array(), 'attributes'=>array(), 'variations'=>array() );
     if ( ! class_exists( 'DOMDocument' ) ) return $out;
     $previous = libxml_use_internal_errors( true );
     $dom = new DOMDocument();
@@ -48,7 +48,7 @@ function woocomport_extract_product( $html, $url ) {
         $key = strtolower( $node->getAttribute( 'property' ) ?: $node->getAttribute( 'name' ) );
         $meta[$key] = trim( $node->getAttribute( 'content' ) );
     }
-    $out['name'] = $meta['og:title'] ?? ( $meta['twitter:title'] ?? '' );
+    $out['name'] = ''; // Product heading is authoritative; SEO titles are only a last resort.
     $out['short_description'] = $meta['og:description'] ?? ( $meta['description'] ?? '' );
     $out['image'] = $meta['og:image'] ?? ( $meta['twitter:image'] ?? '' );
     $out['price'] = $meta['product:price:amount'] ?? ( $meta['product:price'] ?? ( $meta['og:price:amount'] ?? '' ) );
@@ -80,6 +80,62 @@ function woocomport_extract_product( $html, $url ) {
             break;
         }
     }
+    // Prefer the visible product H1 over SEO/meta titles.
+    $h1 = $xp->query( '//h1' );
+    if ( $h1->length ) {
+        foreach ( $h1 as $heading ) {
+            $heading_text = trim( preg_replace( '/\\s+/u', ' ', $heading->textContent ) );
+            if ( $heading_text !== '' ) { $out['name'] = $heading_text; break; }
+        }
+    }
+    // Collect gallery images from common WooCommerce and storefront gallery containers.
+    $gallery_nodes = $xp->query('//*[contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-gallery") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-images") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"gallery") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"gallery")]//img | //img[contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"wp-post-image")]');
+    foreach ( $gallery_nodes as $img ) {
+        $src = $img->getAttribute('data-large_image') ?: ( $img->getAttribute('data-src') ?: ( $img->getAttribute('data-lazy-src') ?: $img->getAttribute('src') ) );
+        if ( ! $src && $img->getAttribute('srcset') ) { $srcset = explode(',', $img->getAttribute('srcset')); $last = trim(end($srcset)); $src = preg_split('/\\s+/', $last)[0] ?? ''; }
+        $src = esc_url_raw( WP_Http::make_absolute_url( $src, $url ) );
+        if ( $src && wp_http_validate_url($src) ) $out['gallery'][$src] = $src;
+    }
+    if ( $out['image'] ) $out['gallery'][$out['image']] = $out['image'];
+    // Extract visible product attributes from WooCommerce tables and definition lists.
+    foreach ( $xp->query('//table[contains(@class,"woocommerce-product-attributes")]//tr | //table[contains(@class,"product-attributes")]//tr | //dl[contains(@class,"product")]/dt') as $row ) {
+        if ( strtolower($row->nodeName) === 'tr' ) {
+            $key = ''; $val = '';
+            foreach ( $row->childNodes as $cell ) { if ( $cell->nodeType !== XML_ELEMENT_NODE ) continue; if ( in_array(strtolower($cell->nodeName), array('th','td'), true) ) { if ( !$key ) $key = trim($cell->textContent); else $val = trim($cell->textContent); } }
+        } else {
+            $key = trim($row->textContent); $val = '';
+            $next = $row->nextSibling; while ( $next && $next->nodeType !== XML_ELEMENT_NODE ) $next = $next->nextSibling;
+            if ( $next ) $val = trim($next->textContent);
+        }
+        $key = sanitize_text_field($key); $val = sanitize_text_field($val);
+        if ( $key && $val ) $out['attributes'][$key] = array_values(array_filter(array_map('trim', preg_split('/[,،|]+/u', $val))));
+    }
+    // Parse selectable product options; these are used as variation attributes when available.
+    $selects = $xp->query('//form[contains(@class,"variations_form")]//select | //select[contains(@name,"attribute")]');
+    $variation_attributes = array();
+    foreach ( $selects as $select ) {
+        $label = '';
+        $id = $select->getAttribute('id');
+        if ( $id ) { $labels = $xp->query('//label[@for="' . addslashes($id) . '"]'); if ( $labels->length ) $label = trim($labels->item(0)->textContent); }
+        $field = $select->getAttribute('name');
+        $label = $label ?: preg_replace('/^attribute_(pa_)?/', '', $field);
+        $options = array();
+        foreach ( $xp->query('.//option', $select) as $option ) { $v = trim($option->getAttribute('value')); $t = trim($option->textContent); if ( $v !== '' && $t !== '' ) $options[$v] = $t; }
+        if ( $options ) { $out['attributes'][$label] = array_values($options); $variation_attributes[$field] = $options; }
+    }
+    // WooCommerce embeds full variation records as JSON in data-product_variations.
+    foreach ( $xp->query('//form[contains(@class,"variations_form")][@data-product_variations]') as $form ) {
+        $records = json_decode(html_entity_decode($form->getAttribute('data-product_variations'), ENT_QUOTES | ENT_HTML5, 'UTF-8'), true);
+        if ( is_array($records) ) foreach ( $records as $record ) {
+            if ( ! is_array($record) || empty($record['display_price']) ) continue;
+            $attrs = array();
+            foreach ( (array)($record['attributes'] ?? array()) as $key => $value ) {
+                $label = preg_replace('/^attribute_(pa_)?/', '', $key);
+                $attrs[$label] = isset($variation_attributes[$key][$value]) ? $variation_attributes[$key][$value] : $value;
+            }
+            $out['variations'][] = array('name'=>'', 'sku'=>(string)($record['sku'] ?? ''), 'price'=>woocomport_normalize_number($record['display_price']), 'attributes'=>$attrs);
+        }
+    }
     // Extract the actual product body separately from SEO/meta summaries.
     $long_candidates = $xp->query(
         '//*[contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"description") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"description") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-content") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-content") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-detail") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-detail")]'
@@ -107,7 +163,7 @@ function woocomport_extract_product( $html, $url ) {
     $out['description'] = wp_kses_post( html_entity_decode( (string) $out['description'], ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
     $out['price'] = woocomport_normalize_number( $out['price'] );
     $out['sku'] = sanitize_text_field( (string) $out['sku'] );
-    $out['image'] = esc_url_raw( (string) $out['image'] );
+    $out['image'] = esc_url_raw( (string) $out['image'] );\n    $out['gallery'] = array_values( array_unique( array_filter( $out['gallery'] ) ) );
     libxml_clear_errors(); libxml_use_internal_errors( $previous );
     return $out;
 }
@@ -246,17 +302,55 @@ function woocomport_crawl_categories( $root_url, $max_pages = 30, $max_products 
 
 function woocomport_import_product( $item ) {
     if ( ! class_exists( 'WooCommerce' ) ) return new WP_Error( 'no_wc', 'ووکامرس فعال نیست.' );
-    $product = new WC_Product_Simple();
+    $has_variations = ! empty( $item['variations'] ) && ! empty( $item['attributes'] );
+    $product = $has_variations ? new WC_Product_Variable() : new WC_Product_Simple();
     $product->set_name( $item['name'] );
     $product->set_status( 'draft' );
     $product->set_description( $item['description'] );
     $product->set_short_description( $item['short_description'] ?? '' );
-    if ( $item['price'] !== '' ) $product->set_regular_price( wc_format_decimal( $item['price'] ) );
+    if ( $has_variations ) {
+        $wc_attributes = array(); $position = 0;
+        foreach ( $item['attributes'] as $label => $options ) {
+            $attribute = new WC_Product_Attribute();
+            $attribute->set_id( 0 ); $attribute->set_name( sanitize_text_field($label) );
+            $attribute->set_options( array_values(array_unique(array_map('sanitize_text_field', (array)$options))) );
+            $attribute->set_position( $position++ ); $attribute->set_visible( true ); $attribute->set_variation( true );
+            $wc_attributes[] = $attribute;
+        }
+        $product->set_attributes( $wc_attributes );
+    } else {
+        foreach ( (array)($item['attributes'] ?? array()) as $label => $options ) {
+            $attribute = new WC_Product_Attribute();
+            $attribute->set_id(0); $attribute->set_name(sanitize_text_field($label));
+            $attribute->set_options(array_values(array_unique(array_map('sanitize_text_field',(array)$options))));
+            $attribute->set_position(count($wc_attributes ?? array())); $attribute->set_visible(true); $attribute->set_variation(false);
+            $wc_attributes[] = $attribute;
+        }
+        if ( ! empty($wc_attributes) ) $product->set_attributes($wc_attributes);
+    }
+    if ( ! $has_variations && $item['price'] !== '' ) $product->set_regular_price( wc_format_decimal( $item['price'] ) );
     if ( ! empty( $item['sku'] ) && ! wc_get_product_id_by_sku( $item['sku'] ) ) $product->set_sku( $item['sku'] );
     $id = $product->save();
     if ( ! $id ) return new WP_Error( 'save_failed', 'ذخیره محصول در ووکامرس ناموفق بود.' );
+    if ( $has_variations ) {
+        foreach ( $item['variations'] as $variation_data ) {
+            if ( empty($variation_data['price']) ) continue;
+            $variation = new WC_Product_Variation();
+            $variation->set_parent_id($id);
+            $variation->set_status('publish');
+            $variation->set_regular_price(wc_format_decimal($variation_data['price']));
+            if ( ! empty($variation_data['sku']) && ! wc_get_product_id_by_sku($variation_data['sku']) ) $variation->set_sku(sanitize_text_field($variation_data['sku']));
+            $variation_attrs = array();
+            foreach ( (array)($variation_data['attributes'] ?? array()) as $label => $value ) {
+                $variation_attrs['attribute_' . sanitize_title($label)] = sanitize_title($value);
+            }
+            if ( $variation_attrs ) $variation->set_attributes($variation_attrs);
+            $variation->save();
+        }
+        WC_Product_Variable::sync($id);
+    }
     update_post_meta( $id, '_woocomport_source_url', esc_url_raw( $item['url'] ) );
-    if ( ! empty( $item['image'] ) ) {
+    if ( ! empty( $item['gallery'] ) || ! empty( $item['image'] ) ) {
         require_once ABSPATH . 'wp-admin/includes/media.php';
         require_once ABSPATH . 'wp-admin/includes/file.php';
         require_once ABSPATH . 'wp-admin/includes/image.php';
@@ -324,5 +418,5 @@ function woocomport_render_page() {
     } else {
         echo '<div class="wcport-empty">هنوز محصولی نمایش داده نشده است. ابتدا آدرس صفحه دسته‌بندی را وارد و روی «اسکن و استخراج محصولات» بزن.</div>';
     }
-    echo '<hr><p><strong>WooComPort 1.4.0</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
+    echo '<hr><p><strong>WooComPort 1.5.0</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
 }
