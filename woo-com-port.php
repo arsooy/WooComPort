@@ -14,10 +14,10 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
 define( 'WOOCOMPORT_VERSION', '1.6.0' );
 
 add_action( 'admin_menu', function () {
-    add_submenu_page( 'woocommerce', 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port', 'woocomport_render_page' );
-    add_submenu_page( 'woocommerce', 'ورود تکی', 'ورود تکی', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page' );
-    add_submenu_page( 'woocommerce', 'ورود دسته‌بندی', 'ورود دسته‌بندی', 'manage_woocommerce', 'woo-com-port-category', 'woocomport_render_page' );
-    add_submenu_page( 'woocommerce', 'گزارشات', 'گزارشات', 'manage_woocommerce', 'woo-com-port-reports', 'woocomport_render_reports_page' );
+    add_menu_page( 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page', 'dashicons-products', 56 );
+    add_submenu_page( 'woo-com-port-single', 'ورود تکی', 'ورود تکی', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page' );
+    add_submenu_page( 'woo-com-port-single', 'ورود گروهی', 'ورود گروهی', 'manage_woocommerce', 'woo-com-port-category', 'woocomport_render_page' );
+    add_submenu_page( 'woo-com-port-single', 'گزارشات', 'گزارشات', 'manage_woocommerce', 'woo-com-port-reports', 'woocomport_render_reports_page' );
 } );
 
 function woocomport_fetch_page( $url ) {
@@ -371,7 +371,7 @@ function woocomport_import_product( $item ) {
     update_post_meta( $id, '_woocomport_source_url', esc_url_raw( $item['url'] ) );
     update_post_meta( $id, '_woocomport_imported_at', current_time( 'mysql' ) );
     update_post_meta( $id, '_woocomport_import_version', WOOCOMPORT_VERSION );
-    update_post_meta( $id, '_woocomport_import_type', ! empty( $item['variations'] ) ? 'variable' : 'simple' );
+    update_post_meta( $id, '_woocomport_import_type', $has_variations ? 'variable' : 'simple' );
     update_post_meta( $id, '_woocomport_gallery_count', count( (array) ( $item['gallery'] ?? array() ) ) );
     update_post_meta( $id, '_woocomport_attributes_count', count( (array) ( $item['attributes'] ?? array() ) ) );
     update_post_meta( $id, '_woocomport_variations_count', count( (array) ( $item['variations'] ?? array() ) ) );
@@ -379,9 +379,19 @@ function woocomport_import_product( $item ) {
         require_once ABSPATH . 'wp-admin/includes/media.php';
         require_once ABSPATH . 'wp-admin/includes/file.php';
         require_once ABSPATH . 'wp-admin/includes/image.php';
-        $attachment = media_sideload_image( esc_url_raw( $item['image'] ), $id, $item['name'], 'id' );
-        if ( ! is_wp_error( $attachment ) ) set_post_thumbnail( $id, $attachment );
-        else update_post_meta( $id, '_woocomport_image_import_error', $attachment->get_error_message() );
+        $image_urls = array_values( array_unique( array_filter( array_merge( array( $item['image'] ?? '' ), (array) ( $item['gallery'] ?? array() ) ) ) ) );
+        $attachment_ids = array();
+        foreach ( $image_urls as $image_url ) {
+            $attachment = media_sideload_image( esc_url_raw( $image_url ), $id, $item['name'], 'id' );
+            if ( ! is_wp_error( $attachment ) ) $attachment_ids[] = absint( $attachment );
+            elseif ( empty( $item['image_import_error'] ) ) $item['image_import_error'] = $attachment->get_error_message();
+        }
+        if ( ! empty( $attachment_ids ) ) {
+            set_post_thumbnail( $id, $attachment_ids[0] );
+            if ( count( $attachment_ids ) > 1 ) update_post_meta( $id, '_product_image_gallery', implode( ',', array_slice( $attachment_ids, 1 ) ) );
+        } elseif ( ! empty( $item['image_import_error'] ) ) {
+            update_post_meta( $id, '_woocomport_image_import_error', $item['image_import_error'] );
+        }
     }
     return $id;
 }
