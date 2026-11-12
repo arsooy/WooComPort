@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.6.0
+ * Version: 1.6.1
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.6.0' );
+define( 'WOOCOMPORT_VERSION', '1.6.1' );
 
 add_action( 'admin_menu', function () {
     add_menu_page( 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page', 'dashicons-products', 56 );
@@ -402,7 +402,7 @@ function woocomport_admin_header( $active ) {
     echo '<div class="wrap woocomport-wrap" dir="rtl"><style>
     .woocomport-wrap{max-width:1200px}.wcport-head{background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:22px;margin:18px 0}.wcport-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.wcport-stat{background:#fff;border:1px solid #dcdcde;border-radius:10px;padding:16px}.wcport-stat b{display:block;font-size:24px;margin-top:7px;color:#1d4e89}.wcport-btn{background:#2271b1!important;color:#fff!important;border:0!important;padding:7px 16px!important;height:auto!important}.wcport-empty{background:#fff;padding:24px;border:1px dashed #c3c4c7;border-radius:10px;text-align:center}.wcport-table{width:100%;border-collapse:collapse;background:#fff}.wcport-table th,.wcport-table td{padding:11px;border-bottom:1px solid #e2e4e7;text-align:right;vertical-align:top}.wcport-table th{background:#f6f7f7}.wcport-muted{color:#646970;font-size:12px;overflow-wrap:anywhere}@media(max-width:800px){.wcport-stats{grid-template-columns:repeat(2,1fr)}.wcport-table{display:block;overflow:auto}}
     </style><h1>WooComPort</h1><nav class="nav-tab-wrapper">';
-    $tabs = array( 'single'=>array('ورود تکی','admin.php?page=woo-com-port-single'), 'category'=>array('ورود دسته‌بندی','admin.php?page=woo-com-port-category'), 'reports'=>array('گزارشات','admin.php?page=woo-com-port-reports') );
+    $tabs = array( 'single'=>array('ورود تکی','admin.php?page=woo-com-port-single'), 'category'=>array('ورود گروهی','admin.php?page=woo-com-port-category'), 'reports'=>array('گزارشات','admin.php?page=woo-com-port-reports') );
     foreach ( $tabs as $key => $tab ) echo '<a class="nav-tab ' . ( $active === $key ? 'nav-tab-active' : '' ) . '" href="' . esc_url( admin_url($tab[1]) ) . '">' . esc_html($tab[0]) . '</a>';
     echo '</nav>';
 }
