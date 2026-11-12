@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.6.5
+ * Version: 1.6.6
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.6.5' );
+define( 'WOOCOMPORT_VERSION', '1.6.6' );
 
 add_action( 'admin_menu', function () {
     add_menu_page( 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port-single', 'woocomport_render_single_page', 'dashicons-products', 56 );
@@ -91,66 +91,45 @@ function woocomport_extract_product( $html, $url ) {
             if ( $heading_text !== '' ) { $out['name'] = $heading_text; break; }
         }
     }
-    // Keep only the product's own image and images inside an explicitly identified product gallery.
-    // Page-wide image scraping is intentionally disabled: it captures logos, trust badges, banners and category artwork.
+    // Keep the featured image separate from the real product gallery.
+    // Thumbnail rails and unrelated sliders must never contribute gallery images.
     $gallery_candidates = array();
-
-    // Open Graph / Twitter image is used only as the product's featured image, never as a source for unrelated gallery items.
     if ( ! empty( $out['image'] ) ) {
         $featured = esc_url_raw( WP_Http::make_absolute_url( $out['image'], $url ) );
-        if ( $featured && wp_http_validate_url( $featured ) ) {
-            $out['image'] = $featured;
-            $gallery_candidates[$featured] = $featured;
-        }
+        if ( $featured && wp_http_validate_url( $featured ) ) $out['image'] = $featured;
+        else $out['image'] = '';
     }
 
-    // Read image values only from Schema.org Product objects (not recursively from the whole page JSON).
-    foreach ( $xp->query('//script[@type="application/ld+json"]') as $script ) {
-        $json = json_decode( $script->textContent, true );
-        if ( ! is_array( $json ) ) continue;
-        $nodes = isset($json['@graph']) && is_array($json['@graph']) ? $json['@graph'] : ( isset($json[0]) ? $json : array($json) );
-        foreach ( $nodes as $node ) {
-            if ( ! is_array($node) ) continue;
-            $type = $node['@type'] ?? '';
-            $types = is_array($type) ? $type : array($type);
-            if ( ! in_array('Product', $types, true) && ! in_array('https://schema.org/Product', $types, true) && ! in_array('http://schema.org/Product', $types, true) ) continue;
-            $images = $node['image'] ?? array();
-            foreach ( (array) $images as $image_value ) {
-                if ( is_array($image_value) ) $image_value = $image_value['url'] ?? ($image_value['contentUrl'] ?? '');
-                if ( ! is_string($image_value) || '' === trim($image_value) ) continue;
-                $src = esc_url_raw( WP_Http::make_absolute_url( trim($image_value), $url ) );
-                if ( $src && wp_http_validate_url($src) ) $gallery_candidates[$src] = $src;
-            }
-        }
-    }
-
-    // Collect every image exposed by product-gallery markup, including common slider/lightbox
-    // implementations. Never scan the entire page: unrelated site artwork must stay out.
-    $gallery_xpath = '//*[contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," woocommerce-product-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-images ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-image-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," gallery-main ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-media ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," gallery-wrapper ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," swiper-wrapper ") or @data-product-gallery or @data-gallery]';
-    $seen_gallery_containers = array();
+    // Read only explicit product-gallery containers. Do not treat every swiper on the page
+    // as a product gallery: Technosun, for example, has a separate swiper-thumbs rail.
+    $gallery_xpath = '//*[contains(concat(" ",normalize-space(@class)," ")," woocommerce-product-gallery ") or contains(concat(" ",normalize-space(@class)," ")," product-gallery ") or contains(concat(" ",normalize-space(@class)," ")," product-image-gallery ") or @data-product-gallery or @data-gallery]';
     foreach ( $xp->query($gallery_xpath) as $gallery_container ) {
-        $container_context = strtolower($gallery_container->getAttribute('class') . ' ' . $gallery_container->getAttribute('id'));
-        if ( preg_match('/related|upsell|cross.?sell|product-category|category|logo|banner|header|footer|trust|badge|recommend|recent|popular/u', $container_context) ) continue;
-        $container_key = spl_object_hash($gallery_container);
-        if ( isset($seen_gallery_containers[$container_key]) ) continue;
-        $seen_gallery_containers[$container_key] = true;
+        $container_context = strtolower( $gallery_container->getAttribute('class') . ' ' . $gallery_container->getAttribute('id') );
+        if ( preg_match('/related|upsell|cross.?sell|product-category|category|logo|banner|header|footer|trust|badge|recommend|recent|popular|thumb/u', $container_context) ) continue;
 
-        foreach ( $xp->query('.//img | .//source[@srcset] | .//a[@href]', $gallery_container) as $node ) {
+        foreach ( $xp->query('.//img | .//a[@href]', $gallery_container) as $node ) {
+            $node_context = strtolower( $node->getAttribute('class') . ' ' . $node->parentNode->getAttribute('class') );
+            if ( preg_match('/thumb|thumbnail|swiper-thumbs|related|upsell|cross.?sell/u', $node_context) ) continue;
+
             $candidates = array();
-            foreach ( array('data-large_image','data-large','data-original','data-zoom-image','data-full','data-full-image','data-src','data-lazy-src','data-original-src','data-image','data-img','src','href') as $attr ) {
+            foreach ( array('data-large_image','data-large','data-zoom-image','data-full','data-full-image','data-original','data-original-src') as $attr ) {
                 $value = trim($node->getAttribute($attr));
                 if ( $value !== '' ) $candidates[] = $value;
             }
-            foreach ( array('srcset','data-srcset') as $attr ) {
-                $srcset = trim($node->getAttribute($attr));
-                if ( $srcset !== '' ) {
-                    foreach ( explode(',', $srcset) as $candidate ) {
-                        $parts = preg_split('/\s+/', trim($candidate));
-                        if ( ! empty($parts[0]) ) $candidates[] = $parts[0];
-                    }
-                }
+
+            // A normal src is accepted only for an image explicitly marked as the zoomable
+            // main product image, never for small preview thumbnails.
+            $node_class = strtolower($node->getAttribute('class'));
+            if ( $node->nodeName === 'img' && ( strpos($node_class, 'cursor-zoom-in') !== false || strpos($node_class, 'woocommerce-product-gallery__image') !== false ) ) {
+                $value = trim($node->getAttribute('src'));
+                if ( $value !== '' ) $candidates[] = $value;
             }
-            $alt = strtolower($node->getAttribute('alt') . ' ' . $node->getAttribute('title') . ' ' . $node->getAttribute('class'));
+            if ( $node->nodeName === 'a' ) {
+                $href = trim($node->getAttribute('href'));
+                if ( $href !== '' ) $candidates[] = $href;
+            }
+
+            $alt = strtolower($node->getAttribute('alt') . ' ' . $node->getAttribute('title'));
             if ( preg_match('/logo|banner|trust|namad|etemad|badge|icon|category|power|payment|social/u', $alt) ) continue;
 
             foreach ( $candidates as $candidate ) {
@@ -158,17 +137,38 @@ function woocomport_extract_product( $html, $url ) {
                 if ( $candidate === '' || strpos($candidate, 'data:') === 0 || strpos($candidate, 'blob:') === 0 ) continue;
                 $src = esc_url_raw(WP_Http::make_absolute_url($candidate, $url));
                 if ( ! $src || ! wp_http_validate_url($src) ) continue;
-                $path = strtolower((string) wp_parse_url($src, PHP_URL_PATH));
-                // Image URLs may be extensionless on CDNs; accept them only when sourced from image attributes.
-                if ( ! preg_match('~\.(jpg|jpeg|png|webp|gif|avif)(?:$)~i', $path) && ! preg_match('/^(data-large_image|data-large|data-original|data-zoom-image|data-full|data-full-image|data-src|data-lazy-src|data-original-src|data-image|data-img|src|href|srcset|data-srcset)$/', $attr ?? '') ) continue;
+                $query = (string) wp_parse_url($src, PHP_URL_QUERY);
+                // Reject explicit thumbnail-sized CDN variants (e.g. ?w=80 or ?width=150).
+                if ( preg_match('/(?:^|&)(?:w|width|h|height)=(?:[1-9][0-9]?|1[0-4][0-9]|150)(?:&|$)/i', $query) ) continue;
                 $gallery_candidates[$src] = $src;
             }
         }
     }
 
-    // The featured image is first; preserve all unique gallery images (up to 100 per product).
-    if ( ! empty($out['image']) ) {
-        $gallery_candidates = array($out['image'] => $out['image']) + $gallery_candidates;
+    // Technosun's main product slider has zoomable images inside a regular swiper,
+    // while its thumbnail slider is marked swiper-thumbs. Handle that exact structure
+    // without ever scanning generic swiper-wrapper elements across the page.
+    if ( empty($gallery_candidates) ) {
+        $main_swipers = $xp->query('//*[contains(concat(" ",normalize-space(@class)," ")," swiper ") and not(contains(concat(" ",normalize-space(@class)," ")," swiper-thumbs "))]');
+        foreach ( $main_swipers as $swiper ) {
+            $context = strtolower($swiper->getAttribute('class') . ' ' . $swiper->parentNode->getAttribute('class'));
+            if ( preg_match('/related|upsell|cross.?sell|recommend|recent|popular|thumb/u', $context) ) continue;
+            foreach ( $xp->query('.//img[contains(@class,"cursor-zoom-in")]', $swiper) as $img ) {
+                $src = trim($img->getAttribute('src'));
+                if ( $src === '' ) continue;
+                $src = esc_url_raw(WP_Http::make_absolute_url($src, $url));
+                if ( ! $src || ! wp_http_validate_url($src) ) continue;
+                $query = (string) wp_parse_url($src, PHP_URL_QUERY);
+                if ( preg_match('/(?:^|&)(?:w|width|h|height)=(?:[1-9][0-9]?|1[0-4][0-9]|150)(?:&|$)/i', $query) ) continue;
+                $gallery_candidates[$src] = $src;
+            }
+        }
+    }
+
+    // The featured image is used as a fallback only when no real gallery image was found.
+    // This prevents JSON-LD / Open Graph preview images from being appended as extra items.
+    if ( empty($gallery_candidates) && ! empty($out['image']) ) {
+        $gallery_candidates[$out['image']] = $out['image'];
     }
     $out['gallery'] = array_slice($gallery_candidates, 0, 100, true);
 
