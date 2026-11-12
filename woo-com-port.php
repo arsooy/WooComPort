@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooComPort
  * Description: ابزار فارسی استخراج و انتقال محصولات از صفحات عمومی به ووکامرس.
- * Version: 1.3.0
+ * Version: 1.4.0
  * Author: Abbas Akbarabadi
  * Author URI: https://github.com/arsooy
  * Text Domain: woo-com-port
@@ -11,7 +11,7 @@
  * WC requires at least: 7.0
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
-define( 'WOOCOMPORT_VERSION', '1.3.0' );
+define( 'WOOCOMPORT_VERSION', '1.4.0' );
 
 add_action( 'admin_menu', function () {
     add_submenu_page( 'woocommerce', 'WooComPort', 'WooComPort', 'manage_woocommerce', 'woo-com-port', 'woocomport_render_page' );
@@ -37,7 +37,7 @@ function woocomport_normalize_number( $value ) {
 }
 
 function woocomport_extract_product( $html, $url ) {
-    $out = array( 'name'=>'', 'description'=>'', 'price'=>'', 'sku'=>'', 'image'=>'', 'url'=>$url, 'availability'=>'' );
+    $out = array( 'name'=>'', 'short_description'=>'', 'description'=>'', 'price'=>'', 'sku'=>'', 'image'=>'', 'url'=>$url, 'availability'=>'' );
     if ( ! class_exists( 'DOMDocument' ) ) return $out;
     $previous = libxml_use_internal_errors( true );
     $dom = new DOMDocument();
@@ -49,7 +49,7 @@ function woocomport_extract_product( $html, $url ) {
         $meta[$key] = trim( $node->getAttribute( 'content' ) );
     }
     $out['name'] = $meta['og:title'] ?? ( $meta['twitter:title'] ?? '' );
-    $out['description'] = $meta['og:description'] ?? ( $meta['description'] ?? '' );
+    $out['short_description'] = $meta['og:description'] ?? ( $meta['description'] ?? '' );
     $out['image'] = $meta['og:image'] ?? ( $meta['twitter:image'] ?? '' );
     $out['price'] = $meta['product:price:amount'] ?? ( $meta['product:price'] ?? ( $meta['og:price:amount'] ?? '' ) );
     foreach ( $xp->query( '//script[@type="application/ld+json"]' ) as $script ) {
@@ -62,7 +62,7 @@ function woocomport_extract_product( $html, $url ) {
             if ( is_array( $type ) ) $type = implode( ' ', $type );
             if ( stripos( (string) $type, 'Product' ) === false ) continue;
             $out['name'] = $out['name'] ?: ( $node['name'] ?? '' );
-            $out['description'] = $out['description'] ?: ( $node['description'] ?? '' );
+            $out['short_description'] = $out['short_description'] ?: ( $node['description'] ?? '' );
             $out['sku'] = $node['sku'] ?? '';
             if ( empty( $out['image'] ) && ! empty( $node['image'] ) ) {
                 $im = $node['image'];
@@ -80,10 +80,31 @@ function woocomport_extract_product( $html, $url ) {
             break;
         }
     }
+    // Extract the actual product body separately from SEO/meta summaries.
+    $long_candidates = $xp->query(
+        '//*[contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"description") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"description") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-content") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-content") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-detail") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-detail")]'
+    );
+    $long_html = '';
+    foreach ( $long_candidates as $candidate ) {
+        $class_id = strtolower( $candidate->getAttribute('class') . ' ' . $candidate->getAttribute('id') );
+        if ( preg_match('/short|summary|excerpt|breadcrumb|related|comment|review-list/u', $class_id) ) continue;
+        $text = trim( preg_replace('/\\s+/u', ' ', $candidate->textContent ) );
+        if ( mb_strlen( $text, 'UTF-8' ) < 100 ) continue;
+        $inner = '';
+        foreach ( $candidate->childNodes as $child ) $inner .= $dom->saveHTML( $child );
+        if ( strlen( $inner ) > strlen( $long_html ) ) $long_html = $inner;
+    }
+    if ( $long_html ) $out['description'] = $long_html;
+    // If the source has no dedicated short field, retain its concise meta/structured summary.
+    if ( ! $out['short_description'] && $out['description'] ) {
+        $plain = trim( wp_strip_all_tags( $out['description'] ) );
+        $out['short_description'] = mb_substr( $plain, 0, 450, 'UTF-8' );
+    }
     if ( ! $out['name'] ) { $n = $xp->query( '//h1' ); if ( $n->length ) $out['name'] = trim( $n->item(0)->textContent ); }
     if ( ! $out['name'] ) { $n = $xp->query( '//title' ); if ( $n->length ) $out['name'] = trim( $n->item(0)->textContent ); }
     $out['name'] = sanitize_text_field( html_entity_decode( wp_strip_all_tags( $out['name'] ) ) );
-    $out['description'] = sanitize_textarea_field( html_entity_decode( wp_strip_all_tags( $out['description'] ) ) );
+    $out['short_description'] = wp_kses_post( html_entity_decode( (string) $out['short_description'], ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+    $out['description'] = wp_kses_post( html_entity_decode( (string) $out['description'], ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
     $out['price'] = woocomport_normalize_number( $out['price'] );
     $out['sku'] = sanitize_text_field( (string) $out['sku'] );
     $out['image'] = esc_url_raw( (string) $out['image'] );
@@ -229,6 +250,7 @@ function woocomport_import_product( $item ) {
     $product->set_name( $item['name'] );
     $product->set_status( 'draft' );
     $product->set_description( $item['description'] );
+    $product->set_short_description( $item['short_description'] ?? '' );
     if ( $item['price'] !== '' ) $product->set_regular_price( wc_format_decimal( $item['price'] ) );
     if ( ! empty( $item['sku'] ) && ! wc_get_product_id_by_sku( $item['sku'] ) ) $product->set_sku( $item['sku'] );
     $id = $product->save();
@@ -255,7 +277,7 @@ function woocomport_render_page() {
         if ( 'scan' === $action ) {
             if ( ! wp_http_validate_url( $source ) ) $error = 'آدرس دسته‌بندی معتبر نیست.';
             else {
-                $items = woocomport_crawl_categories( $source, 30, 200 );
+                $items = woocomport_crawl_categories( $source, 30, 20 );
                 if ( ! $items ) $error = 'محصول موجودی پیدا نشد. این اسکن فقط کارت‌های محصول و زیرشاخه‌های مشخص‌شده را بررسی می‌کند؛ صفحات عادی نمایش داده نمی‌شوند و مواردی که موجودی‌شان قابل تأیید نباشد کنار گذاشته می‌شوند.';
             }
         } elseif ( 'import' === $action ) {
@@ -283,7 +305,7 @@ function woocomport_render_page() {
     echo '<form method="post">'; wp_nonce_field( 'woocomport_action', 'woocomport_nonce' );
     echo '<p><input type="url" name="source_url" class="large-text" required dir="ltr" placeholder="https://example.com/category/" value="' . esc_attr( $source ) . '"></p><p><button class="button button-primary wcport-btn" name="woocomport_action" value="scan">اسکن و استخراج محصولات</button></p></form></div>';
     if ( $items ) {
-        echo '<div class="wcport-stats"><div class="wcport-stat">کل محصولات پیدا‌شده<b>' . esc_html( $total ) . '</b></div><div class="wcport-stat">اطلاعات استخراج‌شده<b>' . esc_html( $ready ) . '</b></div><div class="wcport-stat">نیازمند بررسی<b>' . esc_html( $total - $ready ) . '</b></div><div class="wcport-stat">حداکثر انتقال در هر نوبت<b>۲۰</b></div></div>';
+        echo '<div class="wcport-stats"><div class="wcport-stat">کل محصولات پیدا‌شده<b>' . esc_html( $total ) . '</b></div><div class="wcport-stat">اطلاعات استخراج‌شده<b>' . esc_html( $ready ) . '</b></div><div class="wcport-stat">نیازمند بررسی<b>' . esc_html( $total - $ready ) . '</b></div><div class="wcport-stat">حداکثر محصولات در هر اسکن<b>۲۰</b></div></div>';
         echo '<form method="post">'; wp_nonce_field( 'woocomport_action', 'woocomport_nonce' ); echo '<input type="hidden" name="woocomport_action" value="import">';
         echo '<div class="wcport-toolbar"><label><input type="checkbox" id="wcport-all"> انتخاب همه موارد قابل انتقال</label><span id="wcport-count">۰ محصول انتخاب شده</span><button type="submit" class="button button-primary wcport-btn">انتقال محصولات انتخاب‌شده به سایتم</button></div>';
         foreach ( $items as $i => $item ) {
@@ -302,5 +324,5 @@ function woocomport_render_page() {
     } else {
         echo '<div class="wcport-empty">هنوز محصولی نمایش داده نشده است. ابتدا آدرس صفحه دسته‌بندی را وارد و روی «اسکن و استخراج محصولات» بزن.</div>';
     }
-    echo '<hr><p><strong>WooComPort 1.3.0</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
+    echo '<hr><p><strong>WooComPort 1.4.0</strong> — طراحی شده توسط <a href="tel:09390332600">عباس اکبرآبادی</a></p></div>';
 }
