@@ -124,44 +124,53 @@ function woocomport_extract_product( $html, $url ) {
         }
     }
 
-    // Accept DOM images only when they belong to a clearly named product-gallery container.
-    $gallery_xpath = '//*[contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," woocommerce-product-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-images ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-image-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," gallery-main ")]';
+    // Collect every image exposed by product-gallery markup, including common slider/lightbox
+    // implementations. Never scan the entire page: unrelated site artwork must stay out.
+    $gallery_xpath = '//*[contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," woocommerce-product-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-images ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-image-gallery ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," gallery-main ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," product-media ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," gallery-wrapper ") or contains(translate(concat(" ",normalize-space(@class)," ",@id," "),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")," swiper-wrapper ") or @data-product-gallery or @data-gallery]';
+    $seen_gallery_containers = array();
     foreach ( $xp->query($gallery_xpath) as $gallery_container ) {
-        // Reject containers that are clearly listing cards, related products, category tiles or site chrome.
         $container_context = strtolower($gallery_container->getAttribute('class') . ' ' . $gallery_container->getAttribute('id'));
-        if ( preg_match('/related|upsell|cross.?sell|product-category|category|logo|banner|header|footer|trust|badge/u', $container_context) ) continue;
-        foreach ( $xp->query('.//img | .//source[@srcset] | .//a[.//img]', $gallery_container) as $node ) {
+        if ( preg_match('/related|upsell|cross.?sell|product-category|category|logo|banner|header|footer|trust|badge|recommend|recent|popular/u', $container_context) ) continue;
+        $container_key = spl_object_hash($gallery_container);
+        if ( isset($seen_gallery_containers[$container_key]) ) continue;
+        $seen_gallery_containers[$container_key] = true;
+
+        foreach ( $xp->query('.//img | .//source[@srcset] | .//a[@href]', $gallery_container) as $node ) {
             $candidates = array();
-            foreach ( array('data-large_image','data-large','data-original','data-zoom-image','data-full','data-src','data-lazy-src','data-original-src','src') as $attr ) {
+            foreach ( array('data-large_image','data-large','data-original','data-zoom-image','data-full','data-full-image','data-src','data-lazy-src','data-original-src','data-image','data-img','src','href') as $attr ) {
                 $value = trim($node->getAttribute($attr));
-                if ( $value ) $candidates[] = $value;
+                if ( $value !== '' ) $candidates[] = $value;
             }
             foreach ( array('srcset','data-srcset') as $attr ) {
                 $srcset = trim($node->getAttribute($attr));
-                if ( $srcset ) foreach ( explode(',', $srcset) as $candidate ) {
-                    $parts = preg_split('/\\s+/', trim($candidate));
-                    if ( ! empty($parts[0]) ) $candidates[] = $parts[0];
+                if ( $srcset !== '' ) {
+                    foreach ( explode(',', $srcset) as $candidate ) {
+                        $parts = preg_split('/\s+/', trim($candidate));
+                        if ( ! empty($parts[0]) ) $candidates[] = $parts[0];
+                    }
                 }
             }
-            if ( strtolower($node->nodeName) === 'a' ) {
-                $href = trim($node->getAttribute('href'));
-                if ( $href ) $candidates[] = $href;
-            }
             $alt = strtolower($node->getAttribute('alt') . ' ' . $node->getAttribute('title') . ' ' . $node->getAttribute('class'));
-            if ( preg_match('/logo|banner|trust|namad|etemad|badge|icon|category|power/u', $alt) ) continue;
+            if ( preg_match('/logo|banner|trust|namad|etemad|badge|icon|category|power|payment|social/u', $alt) ) continue;
+
             foreach ( $candidates as $candidate ) {
-                if ( ! preg_match('~\\.(jpg|jpeg|png|webp|gif)(?:[?#]|$)~i', $candidate) ) continue;
-                $src = esc_url_raw( WP_Http::make_absolute_url($candidate, $url) );
-                if ( $src && wp_http_validate_url($src) ) $gallery_candidates[$src] = $src;
+                $candidate = html_entity_decode(trim($candidate), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                if ( $candidate === '' || strpos($candidate, 'data:') === 0 || strpos($candidate, 'blob:') === 0 ) continue;
+                $src = esc_url_raw(WP_Http::make_absolute_url($candidate, $url));
+                if ( ! $src || ! wp_http_validate_url($src) ) continue;
+                $path = strtolower((string) wp_parse_url($src, PHP_URL_PATH));
+                // Image URLs may be extensionless on CDNs; accept them only when sourced from image attributes.
+                if ( ! preg_match('~\.(jpg|jpeg|png|webp|gif|avif)(?:$)~i', $path) && ! preg_match('/^(data-large_image|data-large|data-original|data-zoom-image|data-full|data-full-image|data-src|data-lazy-src|data-original-src|data-image|data-img|src|href|srcset|data-srcset)$/', $attr ?? '') ) continue;
+                $gallery_candidates[$src] = $src;
             }
         }
     }
 
-    // The featured image is always first; deduplicate and cap gallery size.
+    // The featured image is first; preserve all unique gallery images (up to 100 per product).
     if ( ! empty($out['image']) ) {
         $gallery_candidates = array($out['image'] => $out['image']) + $gallery_candidates;
     }
-    $out['gallery'] = array_slice($gallery_candidates, 0, 30, true);
+    $out['gallery'] = array_slice($gallery_candidates, 0, 100, true);
 
     // Extract visible product attributes from WooCommerce tables and definition lists.
     foreach ( $xp->query('//table[contains(@class,"woocommerce-product-attributes")]//tr | //table[contains(@class,"product-attributes")]//tr | //dl[contains(@class,"product")]/dt') as $row ) {
