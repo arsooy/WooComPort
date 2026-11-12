@@ -136,6 +136,20 @@ function woocomport_extract_product( $html, $url ) {
             $out['variations'][] = array('name'=>'', 'sku'=>(string)($record['sku'] ?? ''), 'price'=>woocomport_normalize_number($record['display_price']), 'attributes'=>$attrs);
         }
     }
+    // If structured offers provide several named prices but no explicit option controls, model them as named variants.
+    if ( count($out['variations']) > 1 ) {
+        $named = array();
+        foreach ( $out['variations'] as $index => $variant ) {
+            $variant_label = trim((string)($variant['name'] ?? ''));
+            if ( $variant_label !== '' ) $named[$index] = $variant_label;
+        }
+        if ( count(array_unique($named)) > 1 ) {
+            $out['attributes']['مدل'] = array_values(array_unique($named));
+            foreach ( $out['variations'] as $index => $variant ) {
+                if ( empty($variant['attributes']) && ! empty($named[$index]) ) $out['variations'][$index]['attributes'] = array('مدل' => $named[$index]);
+            }
+        }
+    }
     // Extract the actual product body separately from SEO/meta summaries.
     $long_candidates = $xp->query(
         '//*[contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"description") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"description") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-content") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-content") or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-detail") or contains(translate(@id,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"product-detail")]'
@@ -302,7 +316,7 @@ function woocomport_crawl_categories( $root_url, $max_pages = 30, $max_products 
 
 function woocomport_import_product( $item ) {
     if ( ! class_exists( 'WooCommerce' ) ) return new WP_Error( 'no_wc', 'ووکامرس فعال نیست.' );
-    $has_variations = ! empty( $item['variations'] ) && ! empty( $item['attributes'] );
+    $has_variations = false;\n    foreach ( (array)($item['variations'] ?? array()) as $candidate_variation ) { if ( ! empty($candidate_variation['attributes']) ) { $has_variations = true; break; } }
     $product = $has_variations ? new WC_Product_Variable() : new WC_Product_Simple();
     $product->set_name( $item['name'] );
     $product->set_status( 'draft' );
